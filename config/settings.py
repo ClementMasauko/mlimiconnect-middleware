@@ -49,9 +49,12 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-CORS_ALLOWED_ORIGINS = [v.strip() for v in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if v.strip()]
+def origin_list(name, default):
+    return [value.strip().rstrip("/") for value in os.getenv(name, default).split(",") if value.strip()]
+
+CORS_ALLOWED_ORIGINS = origin_list("CORS_ALLOWED_ORIGINS", "http://localhost:5173")
 CORS_ALLOW_CREDENTIALS = True
-CSRF_TRUSTED_ORIGINS = [v.strip() for v in os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(",") if v.strip()]
+CSRF_TRUSTED_ORIGINS = origin_list("CSRF_TRUSTED_ORIGINS", "http://localhost:5173")
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SAMESITE = "Lax"
