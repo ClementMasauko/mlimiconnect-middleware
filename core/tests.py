@@ -9,6 +9,11 @@ class ApiTests(TestCase):
         self.user = User.objects.create_user(username="farmer", email="farmer@example.mw", password="strong-pass-123", user_type="farmer")
         self.client = APIClient(enforce_csrf_checks=True)
 
+    def test_service_root_reports_online(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "online")
+
     def test_login_uses_session_cookie_without_returning_tokens(self):
         csrf = self.client.get("/api/csrf/").data["csrfToken"]
         response = self.client.post("/api/auth/login/", {"identifier": "farmer@example.mw", "password": "strong-pass-123"}, format="json", HTTP_X_CSRFTOKEN=csrf)
