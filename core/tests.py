@@ -2,7 +2,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 from django.core import mail
 import re
-from .models import Organization, USSDCredential, User
+from .models import ChatMessage, Conversation, Notification, Organization, Subscription, USSDCredential, User
 
 class ApiTests(TestCase):
     def setUp(self):
@@ -47,6 +47,32 @@ class ApiTests(TestCase):
         self.client.force_authenticate(buyer)
         response = self.client.post("/api/marketplace/listings/", {"name": "Seed", "description": "Certified seed", "price": "1000", "quantity": 2, "category": "seed"}, format="json")
         self.assertEqual(response.status_code, 403)
+
+    def test_conversation_messages_are_private_and_persisted(self):
+        buyer = User.objects.create_user(username="buyer2", email="buyer2@example.mw", password="strong-pass-123")
+        outsider = User.objects.create_user(username="outsider", email="outsider@example.mw", password="strong-pass-123")
+        conversation = Conversation.objects.create(); conversation.participants.add(self.user, buyer)
+        self.client.force_authenticate(self.user)
+        sent = self.client.post(f"/api/messages/conversations/{conversation.id}/messages/", {"text": "Is the equipment available?"}, format="json")
+        self.assertEqual(sent.status_code, 201)
+        self.assertTrue(ChatMessage.objects.filter(conversation=conversation, sender=self.user).exists())
+        self.client.force_authenticate(outsider)
+        self.assertEqual(self.client.get(f"/api/messages/conversations/{conversation.id}/messages/").status_code, 404)
+
+    def test_notification_read_state_and_preferences(self):
+        self.client.force_authenticate(self.user)
+        notification = Notification.objects.create(user=self.user, type="order", title="Order paid", message="Payment confirmed")
+        self.assertEqual(self.client.post(f"/api/notifications/{notification.id}/read/").status_code, 204)
+        notification.refresh_from_db(); self.assertIsNotNone(notification.read_at)
+        saved = self.client.put("/api/users/notifications", {"emailOrders": False, "pushMessages": True}, format="json")
+        self.assertEqual(saved.status_code, 200)
+        self.assertFalse(self.client.get("/api/users/notifications").data["emailOrders"])
+
+    def test_free_ai_advisory_is_metered(self):
+        self.client.force_authenticate(self.user)
+        Subscription.objects.create(user=self.user, plan_id="free", status="active")
+        for _ in range(5): self.assertEqual(self.client.post("/api/advisory/ai/", {"location": "Lilongwe"}, format="json").status_code, 200)
+        self.assertEqual(self.client.post("/api/advisory/ai/", {"location": "Lilongwe"}, format="json").status_code, 429)
 
     @override_settings(USSD_SERVICE_KEY="test-service-secret")
     def test_ussd_authentication_requires_service_key_and_hashed_pin(self):
