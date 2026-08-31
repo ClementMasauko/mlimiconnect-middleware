@@ -6,3 +6,5 @@ db.sqlite3
 media/
 staticfiles/
 
+# Keep the deployable CSV import source; the downloaded archive is redundant.
+data/imports/*.zip

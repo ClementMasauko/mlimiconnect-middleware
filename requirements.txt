@@ -1,8 +1,11 @@
 Django==5.2.5
 djangorestframework==3.16.1
+drf-spectacular==0.28.0
 django-cors-headers==4.7.0
 Pillow==11.3.0
 gunicorn==23.0.0
 psycopg[binary]==3.2.13
 python-dotenv==1.1.1
 whitenoise==6.9.0
+cloudinary==1.44.1
+sentry-sdk==2.35.0
