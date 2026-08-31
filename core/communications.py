@@ -1,5 +1,6 @@
 import json
 import logging
+from email.utils import parseaddr
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -34,15 +35,36 @@ def deliver_email(user, subject, message, category, essential=False):
         return None
     delivery = MessageDelivery.objects.create(user=user, channel="email", category=category, provider="brevo", recipient_hint=recipient_hint(user.email))
     try:
-        connection = None
-        if settings.EMAIL_BACKEND == "django.core.mail.backends.filebased.EmailBackend":
-            connection = get_connection(file_path=settings.EMAIL_FILE_PATH)
-        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], connection=connection, fail_silently=False)
+        if settings.EMAIL_PROVIDER == "brevo_api":
+            if not settings.BREVO_API_KEY:
+                raise RuntimeError("Brevo API key is not configured")
+            sender_name, sender_email = parseaddr(settings.DEFAULT_FROM_EMAIL)
+            if not sender_email:
+                raise RuntimeError("Default sender email is not configured")
+            payload = {
+                "sender": {"name": sender_name or "MlimiConnect", "email": sender_email},
+                "to": [{"email": user.email}],
+                "subject": subject,
+                "textContent": message,
+            }
+            request = Request(
+                settings.BREVO_API_URL,
+                data=json.dumps(payload).encode("utf-8"), method="POST",
+                headers={"Content-Type": "application/json", "Accept": "application/json", "api-key": settings.BREVO_API_KEY, "User-Agent": "MlimiConnect/1.0"},
+            )
+            with urlopen(request, timeout=settings.EMAIL_TIMEOUT) as response:
+                result = json.loads(response.read().decode("utf-8") or "{}")
+            delivery.provider_reference = str(result.get("messageId", ""))[:120]
+        else:
+            connection = None
+            if settings.EMAIL_BACKEND == "django.core.mail.backends.filebased.EmailBackend":
+                connection = get_connection(file_path=settings.EMAIL_FILE_PATH)
+            send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], connection=connection, fail_silently=False)
         delivery.status = "accepted"
     except Exception as error:
         delivery.status, delivery.error_code = "failed", type(error).__name__[:80]
         logger.warning("email_delivery_failed", extra={"category": category, "delivery_id": delivery.id, "error_code": delivery.error_code})
-    delivery.save(update_fields=["status", "error_code", "updated_at"])
+    delivery.save(update_fields=["status", "provider_reference", "error_code", "updated_at"])
     return delivery
 
 
