@@ -39,6 +39,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("csv_path", type=Path)
         parser.add_argument("--dataset-version", help="Dataset version in YYYY-MM-DD format; inferred from filename by default.")
+        parser.add_argument("--replace", action="store_true", help="Replace rows when this dataset version has already been imported.")
 
     @transaction.atomic
     def handle(self, *args, **options):
@@ -57,13 +58,21 @@ class Command(BaseCommand):
         except ValueError as exc:
             raise CommandError("Dataset version must use YYYY-MM-DD format.") from exc
 
+        existing = HistoricalMarketPrice.objects.filter(source_version=source_version)
+        if existing.exists() and not options["replace"]:
+            self.stdout.write(self.style.SUCCESS(
+                f"Dataset version {source_version} is already present ({existing.count():,} estimates); import skipped."
+            ))
+            return
+
         with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             missing = REQUIRED_COLUMNS.difference(reader.fieldnames or [])
             if missing:
                 raise CommandError(f"CSV is missing required columns: {', '.join(sorted(missing))}")
 
-            HistoricalMarketPrice.objects.filter(source_version=source_version).delete()
+            if options["replace"]:
+                existing.delete()
             pending = []
             created = 0
             skipped = 0
