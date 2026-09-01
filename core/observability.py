@@ -25,7 +25,7 @@ class RedactionFilter(logging.Filter):
 class JsonFormatter(logging.Formatter):
     def format(self, record):
         payload = {"timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"), "level": record.levelname, "logger": record.name, "message": record.getMessage()}
-        for key in ["correlation_id", "method", "path", "status_code", "duration_ms"]:
+        for key in ["correlation_id", "method", "path", "status_code", "duration_ms", "provider", "error_code"]:
             if hasattr(record, key): payload[key] = getattr(record, key)
         if record.exc_info: payload["exception"] = self.formatException(record.exc_info)[:4000]
         return json.dumps(redact(payload), default=str, separators=(",", ":"))
