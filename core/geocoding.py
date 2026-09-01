@@ -59,15 +59,23 @@ def reserve_public_request():
     state.save(update_fields=["last_requested_at"])
 
 def search_malawi(query, language="en"):
-    if settings.GEOCODING_PROVIDER != "nominatim":
+    provider = settings.GEOCODING_PROVIDER.casefold()
+    if provider not in {"nominatim", "geoapify"}:
         raise GeocodingError("The address-search provider is not configured.")
+    if provider == "geoapify" and not settings.GEOAPIFY_API_KEY:
+        raise GeocodingError("The Geoapify API key is not configured.")
     normalized = normalize_query(query)
     query_hash = hashlib.sha256(normalized.casefold().encode("utf-8")).hexdigest()
     cached = GeocodingCache.objects.filter(query_hash=query_hash, expires_at__gt=timezone.now()).first()
     if cached: return cached.results, True
     reserve_public_request()
-    params = urlencode({"q": normalized, "format": "jsonv2", "addressdetails": 1, "limit": 5, "countrycodes": "mw", "viewbox": "32.67,-9.36,35.92,-17.13", "bounded": 1, "accept-language": "ny,en" if str(language).lower().startswith("ny") else "en,ny"})
-    request = Request(f"{settings.GEOCODING_API_URL}/search?{params}", headers={"User-Agent": f"MlimiConnect/1.0 ({settings.SUPPORT_EMAIL})", "Accept": "application/json"})
+    if provider == "geoapify":
+        params = urlencode({"text": normalized, "format": "json", "limit": 5, "filter": "countrycode:mw", "bias": "countrycode:mw", "lang": "en", "apiKey": settings.GEOAPIFY_API_KEY})
+        url = f"{settings.GEOAPIFY_API_URL}?{params}"
+    else:
+        params = urlencode({"q": normalized, "format": "jsonv2", "addressdetails": 1, "limit": 5, "countrycodes": "mw", "viewbox": "32.67,-9.36,35.92,-17.13", "bounded": 1, "accept-language": "ny,en" if str(language).lower().startswith("ny") else "en,ny"})
+        url = f"{settings.GEOCODING_API_URL}/search?{params}"
+    request = Request(url, headers={"User-Agent": f"MlimiConnect/1.0 ({settings.SUPPORT_EMAIL})", "Accept": "application/json"})
     try:
         with urlopen(request, timeout=settings.GEOCODING_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -86,11 +94,16 @@ def search_malawi(query, language="en"):
             return fallback, False
         raise GeocodingError("Address search is temporarily unavailable.") from exc
     results = []
-    for row in payload[:5] if isinstance(payload, list) else []:
+    provider_rows = payload.get("results", []) if provider == "geoapify" and isinstance(payload, dict) else payload
+    for row in provider_rows[:5] if isinstance(provider_rows, list) else []:
         try: latitude, longitude = Decimal(str(row["lat"])), Decimal(str(row["lon"]))
         except (KeyError, InvalidOperation): continue
         if not (Decimal("-17.2") <= latitude <= Decimal("-9.2") and Decimal("32.5") <= longitude <= Decimal("36.1")): continue
-        address = row.get("address") if isinstance(row.get("address"), dict) else {}
-        results.append({"label": str(row.get("display_name") or "")[:300], "latitude": str(latitude), "longitude": str(longitude), "osm_reference": f"{str(row.get('osm_type') or '')[:1].upper()}{str(row.get('osm_id') or '')}"[:80], "type": str(row.get("type") or "")[:50], "district": str(address.get("state_district") or address.get("county") or "")[:100]})
+        if provider == "geoapify":
+            reference = str(row.get("place_id") or row.get("result_type") or "")[:72]
+            results.append({"label": str(row.get("formatted") or row.get("address_line1") or "")[:300], "latitude": str(latitude), "longitude": str(longitude), "osm_reference": f"GEO:{reference}"[:80], "type": str(row.get("result_type") or "")[:50], "district": str(row.get("county") or row.get("city") or row.get("state") or "")[:100]})
+        else:
+            address = row.get("address") if isinstance(row.get("address"), dict) else {}
+            results.append({"label": str(row.get("display_name") or "")[:300], "latitude": str(latitude), "longitude": str(longitude), "osm_reference": f"{str(row.get('osm_type') or '')[:1].upper()}{str(row.get('osm_id') or '')}"[:80], "type": str(row.get("type") or "")[:50], "district": str(address.get("state_district") or address.get("county") or "")[:100]})
     GeocodingCache.objects.update_or_create(query_hash=query_hash, defaults={"normalized_query": normalized, "results": results, "expires_at": timezone.now() + timedelta(seconds=settings.GEOCODING_CACHE_SECONDS)})
     return results, False

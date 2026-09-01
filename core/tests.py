@@ -77,6 +77,7 @@ class ApiTests(TestCase):
         diagnosis.refresh_from_db()
         self.assertEqual(diagnosis.results, {}); self.assertEqual(diagnosis.status, "deleted")
 
+    @override_settings(GEOCODING_PROVIDER="nominatim")
     def test_geocoding_is_malawi_bounded_cached_attributed_and_signed(self):
         import json
         from unittest.mock import patch
@@ -99,6 +100,7 @@ class ApiTests(TestCase):
             throttled = self.client.get("/api/locations/search/?q=Blantyre%20CBD")
         self.assertEqual(throttled.status_code, 429)
 
+    @override_settings(GEOCODING_PROVIDER="nominatim")
     def test_geocoding_uses_local_pilot_fallback_when_provider_throttles(self):
         from urllib.error import HTTPError
         from unittest.mock import patch
@@ -108,6 +110,25 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["results"][0]["osm_reference"], "LOCAL:lilongwe-city-centre")
         self.assertEqual(response.data["results"][0]["district"], "Lilongwe")
+
+    @override_settings(GEOCODING_PROVIDER="geoapify", GEOAPIFY_API_KEY="geo-test-key", GEOAPIFY_API_URL="https://api.geoapify.com/v1/geocode/search")
+    def test_geoapify_search_is_malawi_filtered_and_signed(self):
+        import json
+        from unittest.mock import patch
+        payload = {"results": [{"formatted": "Area 23, Lilongwe, Malawi", "lat": -14.03, "lon": 33.49, "place_id": "place-23", "result_type": "suburb", "county": "Lilongwe"}]}
+        class ProviderResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps(payload).encode("utf-8")
+        self.client.force_authenticate(self.user)
+        with patch("core.geocoding.urlopen", return_value=ProviderResponse()) as provider:
+            response = self.client.get("/api/locations/search/?q=Area%2023%2C%20Lilongwe")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["results"][0]["osm_reference"], "GEO:place-23")
+        self.assertIn("Geoapify", response.data["attribution"])
+        requested_url = provider.call_args.args[0].full_url
+        self.assertIn("filter=countrycode%3Amw", requested_url)
+        self.assertIn("apiKey=geo-test-key", requested_url)
 
     @override_settings(PAYMENT_WEBHOOK_SECRET="webhook-test-secret")
     def test_payment_webhook_signature_monitoring_and_public_status(self):

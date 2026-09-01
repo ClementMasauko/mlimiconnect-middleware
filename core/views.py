@@ -889,7 +889,8 @@ class GeocodingSearchView(APIView):
         try: results, cached = search_malawi(request.query_params.get("q"), request.query_params.get("language", "en"))
         except GeocodingRateLimited as error: return Response({"detail": str(error)}, status=429, headers={"Retry-After": "1"})
         except GeocodingError as error: return Response({"detail": str(error)}, status=503 if "unavailable" in str(error).lower() else 400)
-        return Response({"results": [{**row, "selection_token": sign_selection(row)} for row in results], "cached": cached, "country": "Malawi", "attribution": ATTRIBUTION, "attribution_url": ATTRIBUTION_URL, "notice": "Search only after the user submits. Do not enter confidential or highly personal information."})
+        attribution = "Powered by Geoapify; map data © OpenStreetMap contributors" if settings.GEOCODING_PROVIDER.casefold() == "geoapify" else ATTRIBUTION
+        return Response({"results": [{**row, "selection_token": sign_selection(row)} for row in results], "cached": cached, "country": "Malawi", "attribution": attribution, "attribution_url": ATTRIBUTION_URL, "notice": "Search only after the user submits. Do not enter confidential or highly personal information."})
 
 class DeliveryQuotesView(APIView):
     def get(self, request, delivery_id):

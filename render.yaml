@@ -87,6 +87,16 @@ services:
         value: kindwise
       - key: KINDWISE_API_KEY
         sync: false
+      - key: GEOCODING_PROVIDER
+        value: geoapify
+      - key: GEOAPIFY_API_KEY
+        sync: false
+      - key: GEOAPIFY_API_URL
+        value: https://api.geoapify.com/v1/geocode/search
+      - key: GEOCODING_TIMEOUT_SECONDS
+        value: "8"
+      - key: GEOCODING_CACHE_SECONDS
+        value: "2592000"
       - key: SUPPORT_EMAIL
         sync: false
       - key: SUPPORT_PHONE
