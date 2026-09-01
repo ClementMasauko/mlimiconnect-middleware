@@ -854,7 +854,10 @@ class TransporterDocumentsView(APIView):
 
 class DeliveryRequestView(APIView):
     def get(self, request):
-        delivery = generics.get_object_or_404(Delivery.objects.select_related("transporter", "order"), order_id=request.query_params.get("order_id"), order__buyer=request.user)
+        order = generics.get_object_or_404(Order, id=request.query_params.get("order_id"), buyer=request.user)
+        delivery = Delivery.objects.select_related("transporter", "order").filter(order=order).first()
+        if not delivery:
+            return Response(None)
         return Response({"id": delivery.id, "order_id": delivery.order_id, "pickup_location": delivery.pickup_location, "delivery_location": delivery.delivery_location, "pickup_latitude": delivery.pickup_latitude, "pickup_longitude": delivery.pickup_longitude, "delivery_latitude": delivery.delivery_latitude, "delivery_longitude": delivery.delivery_longitude, "status": delivery.status, "distance_km": delivery.distance_km, "delivery_fee": delivery.delivery_fee, "liability_rule": delivery.liability_rule, "transporter": delivery.transporter.username if delivery.transporter else None, "external_provider": delivery.external_provider, "external_reference": delivery.external_reference, "quotes": [{"id": row.id, "transporter": row.transporter.username, "amount": row.amount, "estimated_hours": row.estimated_hours, "note": row.note, "status": row.status} for row in delivery.quotes.select_related("transporter").order_by("amount")], "locations": [{"latitude": row.latitude, "longitude": row.longitude, "status_note": row.status_note, "created_at": row.created_at} for row in delivery.location_updates.order_by("-created_at")[:20]]})
     @transaction.atomic
     def post(self, request):
