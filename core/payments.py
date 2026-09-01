@@ -107,10 +107,12 @@ def verify_and_reconcile(tx_ref):
     reconciliation.status = "matched" if matched else "mismatch"
     reconciliation.reconciled_at = timezone.now()
     authorization = data.get("authorization") if isinstance(data.get("authorization"), dict) else {}
+    provider_transaction_id = str(data.get("trans_id") or data.get("ref_id") or data.get("reference") or "")[:120]
     reconciliation.provider_payload = {
         "status": provider_status, "currency": currency, "amount": str(amount) if amount >= 0 else None,
         "mode": mode, "channel": str(authorization.get("channel") or "")[:40],
-        "provider_reference": str(data.get("reference") or "")[:120],
+        "provider_reference": provider_transaction_id,
+        "provider_transaction_id": provider_transaction_id,
         "verified_at": reconciliation.reconciled_at.isoformat(),
     }
     reconciliation.save(update_fields=["settled_amount", "status", "reconciled_at", "provider_payload"])

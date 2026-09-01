@@ -225,13 +225,27 @@ class OrderSerializer(serializers.ModelSerializer):
     status_history = serializers.SerializerMethodField()
     delivery_evidence = serializers.SerializerMethodField()
     refunds = serializers.SerializerMethodField()
+    payment_transaction = serializers.SerializerMethodField()
     class Meta:
         model = Order
-        fields = ["id", "status", "subtotal", "total", "payment_method", "acceptance_deadline", "cancellation_reason", "created_at", "items", "status_history", "delivery_evidence", "refunds"]
+        fields = ["id", "status", "subtotal", "total", "payment_method", "payment_transaction", "acceptance_deadline", "cancellation_reason", "created_at", "items", "status_history", "delivery_evidence", "refunds"]
     def get_items(self, obj): return [{"listing_id": item.listing_id, "name": item.listing.name, "quantity": item.quantity, "fulfilled_quantity": item.fulfilled_quantity, "unit_price": item.unit_price, "seller": item.listing.seller.username} for item in obj.items.select_related("listing__seller")]
     def get_status_history(self, obj): return list(obj.status_history.values("from_status", "to_status", "reason", "created_at", actor_name=__import__("django.db.models", fromlist=["F"]).F("actor__username")))
     def get_delivery_evidence(self, obj): return list(obj.delivery_evidence.values("id", "evidence_type", "file", "reference", "note", "location", "latitude", "longitude", "signature_name", "created_at"))
     def get_refunds(self, obj): return list(obj.refunds.values("id", "amount", "provider", "provider_reference", "status", "settled_at", "created_at"))
+    def get_payment_transaction(self, obj):
+        reconciliation = obj.reconciliations.order_by("-created_at").first()
+        if not reconciliation:
+            return None
+        payload = reconciliation.provider_payload if isinstance(reconciliation.provider_payload, dict) else {}
+        return {
+            "provider": reconciliation.provider,
+            "transaction_reference": reconciliation.provider_reference,
+            "provider_transaction_id": str(payload.get("provider_transaction_id") or payload.get("provider_reference") or ""),
+            "status": reconciliation.status,
+            "settled_amount": reconciliation.settled_amount,
+            "reconciled_at": reconciliation.reconciled_at,
+        }
 
 class TraceabilityEventSerializer(serializers.ModelSerializer):
     actor = serializers.CharField(source="actor.username", read_only=True)
