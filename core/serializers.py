@@ -56,9 +56,9 @@ class RegisterSerializer(serializers.ModelSerializer):
         user.is_active = False
         user.save(update_fields=["is_active"])
         code = f"{__import__('secrets').randbelow(1000000):06d}"
-        verification = EmailVerificationRequest(user=user, expires_at=__import__('django.utils.timezone', fromlist=['now']).now() + __import__('datetime').timedelta(minutes=15))
+        verification = EmailVerificationRequest(user=user, expires_at=__import__('django.utils.timezone', fromlist=['now']).now() + __import__('datetime').timedelta(minutes=10))
         verification.set_code(code); verification.save()
-        deliver_security_code(user, "Verify your MlimiConnect account", f"Your verification code is {code}. It expires in 15 minutes.", f"MlimiConnect verification code: {code}. It expires in 15 minutes. Never share this code.", "security")
+        deliver_security_code(user, "Verify your MlimiConnect account", f"Your verification code is {code}. It expires in 10 minutes.", f"MlimiConnect verification code: {code}. It expires in 10 minutes. Never share this code.", "security")
         if account_type != "individual":
             organization = Organization.objects.create(owner=user, **organization_data)
             OrganizationMember.objects.create(organization=organization, user=user, role="owner", status="active", can_procure=True, can_manage_members=True, can_manage_listings=True, can_approve=True, invited_by=user)
