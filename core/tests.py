@@ -99,6 +99,16 @@ class ApiTests(TestCase):
             throttled = self.client.get("/api/locations/search/?q=Blantyre%20CBD")
         self.assertEqual(throttled.status_code, 429)
 
+    def test_geocoding_uses_local_pilot_fallback_when_provider_throttles(self):
+        from urllib.error import HTTPError
+        from unittest.mock import patch
+        self.client.force_authenticate(self.user)
+        with patch("core.geocoding.urlopen", side_effect=HTTPError("https://nominatim.openstreetmap.org", 429, "Too Many Requests", None, None)):
+            response = self.client.get("/api/locations/search/?q=City%20Centre%2C%20Lilongwe")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["results"][0]["osm_reference"], "LOCAL:lilongwe-city-centre")
+        self.assertEqual(response.data["results"][0]["district"], "Lilongwe")
+
     @override_settings(PAYMENT_WEBHOOK_SECRET="webhook-test-secret")
     def test_payment_webhook_signature_monitoring_and_public_status(self):
         import hashlib, hmac

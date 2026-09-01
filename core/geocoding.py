@@ -13,8 +13,17 @@ from django.utils import timezone
 
 from .models import GeocodingCache, GeocodingRequestState
 
-ATTRIBUTION = "© OpenStreetMap contributors"
+ATTRIBUTION = "MlimiConnect Malawi place index; broader search © OpenStreetMap contributors"
 ATTRIBUTION_URL = "https://www.openstreetmap.org/copyright"
+
+LOCAL_PLACES = [
+    {"keys": ["area 23", "area 23 lilongwe"], "label": "Area 23, Lilongwe, Malawi", "latitude": "-14.0300", "longitude": "33.4900", "district": "Lilongwe", "reference": "LOCAL:area-23"},
+    {"keys": ["city centre lilongwe", "lilongwe city centre"], "label": "City Centre, Lilongwe, Malawi", "latitude": "-13.9626", "longitude": "33.7741", "district": "Lilongwe", "reference": "LOCAL:lilongwe-city-centre"},
+    {"keys": ["lilongwe"], "label": "Lilongwe, Central Region, Malawi", "latitude": "-13.9626", "longitude": "33.7741", "district": "Lilongwe", "reference": "LOCAL:lilongwe"},
+    {"keys": ["blantyre"], "label": "Blantyre, Southern Region, Malawi", "latitude": "-15.7861", "longitude": "35.0058", "district": "Blantyre", "reference": "LOCAL:blantyre"},
+    {"keys": ["mzuzu"], "label": "Mzuzu, Northern Region, Malawi", "latitude": "-11.4581", "longitude": "34.0151", "district": "Mzimba", "reference": "LOCAL:mzuzu"},
+    {"keys": ["zomba"], "label": "Zomba, Southern Region, Malawi", "latitude": "-15.3833", "longitude": "35.3333", "district": "Zomba", "reference": "LOCAL:zomba"},
+]
 
 class GeocodingError(RuntimeError): pass
 class GeocodingRateLimited(GeocodingError): pass
@@ -31,6 +40,14 @@ def normalize_query(value):
     if len(query) < 3 or len(query) > 160:
         raise GeocodingError("Enter an address or place name between 3 and 160 characters.")
     return query
+
+def local_results(normalized):
+    needle = " ".join(normalized.casefold().replace(",", " ").split())
+    matches = []
+    for place in LOCAL_PLACES:
+        if any(needle == key or needle in key or key in needle for key in place["keys"]):
+            matches.append({"label": place["label"], "latitude": place["latitude"], "longitude": place["longitude"], "osm_reference": place["reference"], "type": "local_place", "district": place["district"]})
+    return matches[:5]
 
 @transaction.atomic
 def reserve_public_request():
@@ -54,8 +71,20 @@ def search_malawi(query, language="en"):
     try:
         with urlopen(request, timeout=settings.GEOCODING_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc: raise GeocodingError(f"Address provider rejected the request ({exc.code}).") from exc
-    except (URLError, TimeoutError, json.JSONDecodeError) as exc: raise GeocodingError("Address search is temporarily unavailable.") from exc
+    except HTTPError as exc:
+        fallback = local_results(normalized)
+        if fallback:
+            GeocodingCache.objects.update_or_create(query_hash=query_hash, defaults={"normalized_query": normalized, "results": fallback, "expires_at": timezone.now() + timedelta(seconds=settings.GEOCODING_CACHE_SECONDS)})
+            return fallback, False
+        if exc.code == 429:
+            raise GeocodingRateLimited("Address search is busy. Wait a moment or search for a nearby Malawi district or city.") from exc
+        raise GeocodingError(f"Address provider rejected the request ({exc.code}).") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        fallback = local_results(normalized)
+        if fallback:
+            GeocodingCache.objects.update_or_create(query_hash=query_hash, defaults={"normalized_query": normalized, "results": fallback, "expires_at": timezone.now() + timedelta(seconds=settings.GEOCODING_CACHE_SECONDS)})
+            return fallback, False
+        raise GeocodingError("Address search is temporarily unavailable.") from exc
     results = []
     for row in payload[:5] if isinstance(payload, list) else []:
         try: latitude, longitude = Decimal(str(row["lat"])), Decimal(str(row["lon"]))
