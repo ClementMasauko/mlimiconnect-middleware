@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import datetime, timezone as datetime_timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -108,6 +109,43 @@ def _transform(payload, location, latitude, longitude):
     }
 
 
+def _met_condition(symbol):
+    return str(symbol or "Conditions unavailable").replace("_", " ").replace("day", "").replace("night", "").strip().title()
+
+
+def _transform_met(payload, location, latitude, longitude):
+    timeseries = (payload.get("properties") or {}).get("timeseries") or []
+    if not timeseries:
+        raise WeatherUnavailable("Fallback weather data did not contain a forecast.")
+    local_zone, daily = ZoneInfo("Africa/Blantyre"), {}
+    for row in timeseries:
+        instant = ((row.get("data") or {}).get("instant") or {}).get("details") or {}
+        period = (row.get("data") or {}).get("next_1_hours") or (row.get("data") or {}).get("next_6_hours") or {}
+        stamp = datetime.fromisoformat(str(row.get("time", "")).replace("Z", "+00:00")).astimezone(local_zone)
+        bucket = daily.setdefault(stamp.date().isoformat(), {"temperatures": [], "rain": 0.0, "rain_probability": [], "condition": "Conditions unavailable"})
+        temperature = _number(instant.get("air_temperature"))
+        if temperature is not None: bucket["temperatures"].append(temperature)
+        details = period.get("details") or {}
+        precipitation = _number(details.get("precipitation_amount"))
+        if precipitation is not None: bucket["rain"] += precipitation
+        probability = _number(details.get("probability_of_precipitation"))
+        if probability is not None: bucket["rain_probability"].append(probability)
+        symbol = (period.get("summary") or {}).get("symbol_code")
+        if symbol: bucket["condition"] = _met_condition(symbol)
+    forecast = [{"date": day, "condition": values["condition"], "weather_code": None, "temperature_max_c": max(values["temperatures"]) if values["temperatures"] else None, "temperature_min_c": min(values["temperatures"]) if values["temperatures"] else None, "rain_probability_percent": max(values["rain_probability"]) if values["rain_probability"] else None, "precipitation_mm": round(values["rain"], 1), "et0_mm": None} for day, values in list(sorted(daily.items()))[:7]]
+    first = timeseries[0]
+    current = ((first.get("data") or {}).get("instant") or {}).get("details") or {}
+    first_period = (first.get("data") or {}).get("next_1_hours") or (first.get("data") or {}).get("next_6_hours") or {}
+    return {"location": location, "latitude": latitude, "longitude": longitude, "timezone": "Africa/Blantyre", "current": {"time": first.get("time"), "condition": _met_condition((first_period.get("summary") or {}).get("symbol_code")), "weather_code": None, "temperature_c": _number(current.get("air_temperature")), "humidity_percent": _number(current.get("relative_humidity")), "precipitation_mm": _number((first_period.get("details") or {}).get("precipitation_amount")), "wind_speed_kmh": round((_number(current.get("wind_speed")) or 0) * 3.6, 1), "soil_temperature_c": None, "soil_moisture": None}, "forecast": forecast, "source": "MET Norway", "source_url": "https://api.met.no/weatherapi/locationforecast/2.0/documentation", "collected_at": datetime.now(datetime_timezone.utc).isoformat(), "stale": False, "disclaimer": "Forecasts are automated estimates. Check local warnings before making safety-critical farming decisions."}
+
+
+def _get_met_fallback(location, latitude, longitude):
+    query = urlencode({"lat": f"{latitude:.4f}", "lon": f"{longitude:.4f}"})
+    request = Request(f"{settings.WEATHER_FALLBACK_API_URL}?{query}", headers={"Accept": "application/json", "User-Agent": settings.WEATHER_USER_AGENT})
+    with urlopen(request, timeout=settings.WEATHER_TIMEOUT_SECONDS) as response:
+        return _transform_met(json.loads(response.read().decode("utf-8")), location, latitude, longitude)
+
+
 def get_weather(district="Lilongwe", latitude=None, longitude=None):
     location, lat, lon = _resolve_location(district, latitude, longitude)
     identity = f"{lat:.3f}:{lon:.3f}"
@@ -130,6 +168,15 @@ def get_weather(district="Lilongwe", latitude=None, longitude=None):
     except Exception as error:
         error_code = f"http_{error.code}" if isinstance(error, HTTPError) else type(error).__name__[:80]
         logger.warning("weather_provider_failed", extra={"error_code": error_code, "provider": settings.WEATHER_PROVIDER})
+        if isinstance(error, HTTPError) and error.code == 429:
+            try:
+                result = _get_met_fallback(location, lat, lon)
+                cache.set(fresh_key, result, settings.WEATHER_CACHE_SECONDS)
+                cache.set(fallback_key, result, settings.WEATHER_STALE_SECONDS)
+                return {**result, "cached": False}
+            except Exception as fallback_error:
+                fallback_code = f"http_{fallback_error.code}" if isinstance(fallback_error, HTTPError) else type(fallback_error).__name__[:80]
+                logger.warning("weather_fallback_failed", extra={"error_code": fallback_code, "provider": "met_norway"})
         fallback = cache.get(fallback_key)
         if fallback:
             return {**fallback, "cached": True, "stale": True}

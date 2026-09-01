@@ -43,6 +43,10 @@ services:
         value: https://api.open-meteo.com/v1/forecast
       - key: WEATHER_TIMEOUT_SECONDS
         value: "8"
+      - key: WEATHER_FALLBACK_API_URL
+        value: https://api.met.no/weatherapi/locationforecast/2.0/compact
+      - key: WEATHER_USER_AGENT
+        value: MlimiConnect/1.0 https://mlimiconnect.netlify.app/contact
       - key: MEDIA_STORAGE_PROVIDER
         value: cloudinary
       - key: CLOUDINARY_URL
