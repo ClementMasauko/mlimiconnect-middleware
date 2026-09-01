@@ -1,10 +1,14 @@
 import json
+import logging
 from datetime import datetime, timezone as datetime_timezone
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from django.conf import settings
 from django.core.cache import cache
+
+
+logger = logging.getLogger("mlimiconnect")
 
 
 class WeatherUnavailable(RuntimeError):
@@ -123,6 +127,7 @@ def get_weather(district="Lilongwe", latitude=None, longitude=None):
         cache.set(fallback_key, result, settings.WEATHER_STALE_SECONDS)
         return {**result, "cached": False}
     except Exception as error:
+        logger.warning("weather_provider_failed", extra={"error_code": type(error).__name__[:80], "provider": settings.WEATHER_PROVIDER})
         fallback = cache.get(fallback_key)
         if fallback:
             return {**fallback, "cached": True, "stale": True}

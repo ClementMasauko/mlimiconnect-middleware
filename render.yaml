@@ -37,6 +37,12 @@ services:
         sync: false
       - key: PAYMENT_WEBHOOK_SECRET
         sync: false
+      - key: WEATHER_PROVIDER
+        value: open_meteo
+      - key: WEATHER_API_URL
+        value: https://api.open-meteo.com/v1/forecast
+      - key: WEATHER_TIMEOUT_SECONDS
+        value: "8"
       - key: MEDIA_STORAGE_PROVIDER
         value: cloudinary
       - key: CLOUDINARY_URL
