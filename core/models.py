@@ -20,6 +20,7 @@ class User(AbstractUser):
     seller_verified_at = models.DateTimeField(null=True, blank=True)
     seller_verified_by = models.ForeignKey("self", on_delete=models.PROTECT, null=True, blank=True, related_name="verified_sellers")
     email_verified = models.BooleanField(default=False)
+    google_subject = models.CharField(max_length=255, unique=True, null=True, blank=True)
 
 class EmailVerificationRequest(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="email_verification_requests")

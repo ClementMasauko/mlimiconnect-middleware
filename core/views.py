@@ -19,6 +19,9 @@ import math
 import hashlib
 import hmac
 import json
+import re
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 from rest_framework import generics, permissions, serializers as drf_serializers, status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.exceptions import PermissionDenied
@@ -40,7 +43,7 @@ from .geocoding import ATTRIBUTION, ATTRIBUTION_URL, GeocodingError, GeocodingRa
 from .payments import PaymentProviderError, extract_transaction_reference, initialize_checkout, verify_and_reconcile
 from .crop_planning import build_crop_plan
 from .protected_files import protected_file_link, serve_protected_file
-from .serializers import CheckoutSerializer, ContactSerializer, ConversationSerializer, ListingSerializer, LoginSerializer, MessageSerializer, NewsletterSerializer, NotificationSerializer, OrderReviewSerializer, OrderSerializer, OrganizationSerializer, RegisterSerializer, SubscriptionSerializer, TraceabilityBatchSerializer, UserSerializer
+from .serializers import CheckoutSerializer, ContactSerializer, ConversationSerializer, GoogleCredentialSerializer, GoogleLoginResponseSerializer, ListingSerializer, LoginSerializer, MessageSerializer, NewsletterSerializer, NotificationSerializer, OrderReviewSerializer, OrderSerializer, OrganizationSerializer, RegisterSerializer, SubscriptionSerializer, TraceabilityBatchSerializer, UserSerializer
 
 # APIView does not provide serializer metadata. This empty default keeps every
 # custom endpoint present in the generated OpenAPI document; concrete generic
@@ -129,6 +132,63 @@ class LoginView(APIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
         login(request, user)
+        return Response({"user": UserSerializer(user).data})
+
+def unique_google_username(email):
+    base = re.sub(r"[^a-zA-Z0-9_.-]", "", email.split("@", 1)[0])[:120] or "google-user"
+    candidate, suffix = base, 1
+    while User.objects.filter(username__iexact=candidate).exists():
+        suffix += 1
+        candidate = f"{base[:145 - len(str(suffix))]}-{suffix}"
+    return candidate
+
+@method_decorator(csrf_protect, name="dispatch")
+class GoogleLoginView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    serializer_class = GoogleCredentialSerializer
+
+    @extend_schema(request=GoogleCredentialSerializer, responses={200: GoogleLoginResponseSerializer})
+    @transaction.atomic
+    def post(self, request):
+        if not settings.GOOGLE_CLIENT_ID:
+            return Response({"detail": "Google sign-in is not configured."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            claims = google_id_token.verify_oauth2_token(
+                serializer.validated_data["credential"], google_requests.Request(), settings.GOOGLE_CLIENT_ID,
+            )
+        except ValueError:
+            return Response({"detail": "Google could not verify this sign-in."}, status=status.HTTP_400_BAD_REQUEST)
+
+        subject = str(claims.get("sub", "")).strip()
+        email = str(claims.get("email", "")).strip().lower()
+        email_verified = claims.get("email_verified") is True
+        if not subject or not email or not email_verified:
+            return Response({"detail": "Google did not provide a verified email address."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(google_subject=subject).first()
+        if not user:
+            existing = User.objects.filter(email__iexact=email).first()
+            google_controls_email = email.endswith("@gmail.com") or bool(claims.get("hd"))
+            if existing and not google_controls_email:
+                return Response(
+                    {"detail": "An account already uses this email. Sign in with your password to protect and link it."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if existing and not existing.is_active:
+                return Response({"detail": "This account is inactive."}, status=status.HTTP_403_FORBIDDEN)
+            user = existing or User(username=unique_google_username(email), email=email)
+            user.google_subject = subject
+            user.email_verified = True
+            if not user.pk:
+                user.set_unusable_password()
+            user.save()
+
+        if not user.is_active:
+            return Response({"detail": "This account is inactive."}, status=status.HTTP_403_FORBIDDEN)
+        login(request, user, backend="django.contrib.auth.backends.ModelBackend")
         return Response({"user": UserSerializer(user).data})
 
 class LogoutView(APIView):

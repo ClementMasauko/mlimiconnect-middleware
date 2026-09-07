@@ -88,6 +88,12 @@ class LoginSerializer(serializers.Serializer):
         attrs["user"] = user
         return attrs
 
+class GoogleCredentialSerializer(serializers.Serializer):
+    credential = serializers.CharField(max_length=4096, write_only=True)
+
+class GoogleLoginResponseSerializer(serializers.Serializer):
+    user = UserSerializer()
+
 class WholesalePriceTierSerializer(serializers.ModelSerializer):
     class Meta:
         model = WholesalePriceTier

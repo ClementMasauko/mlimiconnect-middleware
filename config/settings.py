@@ -14,6 +14,7 @@ FEATURE_AUCTIONS_ENABLED = os.getenv("FEATURE_AUCTIONS_ENABLED", "false").lower(
 FEATURE_SUBSCRIPTIONS_ENABLED = os.getenv("FEATURE_SUBSCRIPTIONS_ENABLED", "false").lower() == "true"
 FEATURE_EXPERT_REQUESTS_ENABLED = os.getenv("FEATURE_EXPERT_REQUESTS_ENABLED", "false").lower() == "true"
 FEATURE_PROMOTIONS_ENABLED = os.getenv("FEATURE_PROMOTIONS_ENABLED", "false").lower() == "true"
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 ALLOWED_HOSTS = [v.strip() for v in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if v.strip()]
 
 INSTALLED_APPS = [
