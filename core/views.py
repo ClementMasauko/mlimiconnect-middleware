@@ -43,7 +43,7 @@ from .geocoding import ATTRIBUTION, ATTRIBUTION_URL, GeocodingError, GeocodingRa
 from .payments import PaymentProviderError, extract_transaction_reference, initialize_checkout, verify_and_reconcile
 from .crop_planning import build_crop_plan
 from .protected_files import protected_file_link, serve_protected_file
-from .serializers import CheckoutSerializer, ContactSerializer, ConversationSerializer, GoogleCredentialSerializer, GoogleLoginResponseSerializer, ListingSerializer, LoginSerializer, MessageSerializer, NewsletterSerializer, NotificationSerializer, OrderReviewSerializer, OrderSerializer, OrganizationSerializer, RegisterSerializer, SubscriptionSerializer, TraceabilityBatchSerializer, UserSerializer
+from .serializers import CheckoutSerializer, ContactSerializer, ConversationSerializer, GoogleCredentialSerializer, GoogleLoginResponseSerializer, GoogleOnboardingSerializer, GoogleUnlinkSerializer, ListingSerializer, LoginSerializer, MessageSerializer, NewsletterSerializer, NotificationSerializer, OrderReviewSerializer, OrderSerializer, OrganizationSerializer, PasswordCredentialSerializer, RegisterSerializer, SubscriptionSerializer, TraceabilityBatchSerializer, UserSerializer
 
 # APIView does not provide serializer metadata. This empty default keeps every
 # custom endpoint present in the generated OpenAPI document; concrete generic
@@ -142,6 +142,15 @@ def unique_google_username(email):
         candidate = f"{base[:145 - len(str(suffix))]}-{suffix}"
     return candidate
 
+def verify_google_credential(credential):
+    if not settings.GOOGLE_CLIENT_ID: raise RuntimeError("Google sign-in is not configured.")
+    claims = google_id_token.verify_oauth2_token(credential, google_requests.Request(), settings.GOOGLE_CLIENT_ID)
+    subject = str(claims.get("sub", "")).strip()
+    email = str(claims.get("email", "")).strip().lower()
+    if not subject or not email or claims.get("email_verified") is not True:
+        raise ValueError("Google did not provide a verified email address.")
+    return claims, subject, email
+
 @method_decorator(csrf_protect, name="dispatch")
 class GoogleLoginView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -151,22 +160,14 @@ class GoogleLoginView(APIView):
     @extend_schema(request=GoogleCredentialSerializer, responses={200: GoogleLoginResponseSerializer})
     @transaction.atomic
     def post(self, request):
-        if not settings.GOOGLE_CLIENT_ID:
-            return Response({"detail": "Google sign-in is not configured."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            claims = google_id_token.verify_oauth2_token(
-                serializer.validated_data["credential"], google_requests.Request(), settings.GOOGLE_CLIENT_ID,
-            )
+            claims, subject, email = verify_google_credential(serializer.validated_data["credential"])
+        except RuntimeError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except ValueError:
             return Response({"detail": "Google could not verify this sign-in."}, status=status.HTTP_400_BAD_REQUEST)
-
-        subject = str(claims.get("sub", "")).strip()
-        email = str(claims.get("email", "")).strip().lower()
-        email_verified = claims.get("email_verified") is True
-        if not subject or not email or not email_verified:
-            return Response({"detail": "Google did not provide a verified email address."}, status=status.HTTP_400_BAD_REQUEST)
 
         user = User.objects.filter(google_subject=subject).first()
         if not user:
@@ -184,12 +185,75 @@ class GoogleLoginView(APIView):
             user.email_verified = True
             if not user.pk:
                 user.set_unusable_password()
+                user.google_onboarding_completed = False
             user.save()
 
         if not user.is_active:
             return Response({"detail": "This account is inactive."}, status=status.HTTP_403_FORBIDDEN)
         login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+        AuditLog.objects.create(actor=user, action="auth.google_login", target_type="user", target_id=str(user.id), metadata={"provider": "google", "success": True})
         return Response({"user": UserSerializer(user).data})
+
+class GoogleOnboardingView(APIView):
+    serializer_class = GoogleOnboardingSerializer
+    @transaction.atomic
+    def post(self, request):
+        if not request.user.google_subject or request.user.google_onboarding_completed:
+            return Response({"detail": "Google onboarding is not required."}, status=400)
+        serializer = self.get_serializer(data=request.data); serializer.is_valid(raise_exception=True)
+        data, user = serializer.validated_data, request.user
+        account_type, trading_mode = data["account_type"], data["trading_mode"]
+        organization_data = data.get("organization") or {}
+        if account_type != "individual":
+            required = ["legal_name", "registration_number", "representative_name", "representative_role", "address"]
+            missing = [field for field in required if not str(organization_data.get(field, "")).strip()]
+            if missing: return Response({"detail": f"Missing organization fields: {', '.join(missing)}"}, status=400)
+            if Organization.objects.filter(registration_number=organization_data["registration_number"]).exists():
+                return Response({"detail": "That organization registration number is already in use."}, status=409)
+        user.account_type = account_type
+        user.can_buy = trading_mode in ["buy", "both"]
+        user.can_sell = trading_mode in ["sell", "both"]
+        user.user_type = "organization" if account_type != "individual" else "farmer" if user.can_sell else "buyer"
+        user.phone = str(data.get("phone", "")).strip()
+        user.location = str(data.get("location", "")).strip()
+        user.google_onboarding_completed = True
+        user.save(update_fields=["account_type", "can_buy", "can_sell", "user_type", "phone", "location", "google_onboarding_completed"])
+        if account_type != "individual":
+            organization = Organization.objects.create(owner=user, **organization_data)
+            OrganizationMember.objects.create(organization=organization, user=user, role="owner", status="active", can_procure=True, can_manage_members=True, can_manage_listings=True, can_approve=True, invited_by=user)
+        AuditLog.objects.create(actor=user, action="auth.google_onboarding_completed", target_type="user", target_id=str(user.id), metadata={"account_type": account_type, "trading_mode": trading_mode})
+        return Response({"user": UserSerializer(user).data})
+
+class GoogleLinkView(APIView):
+    serializer_class = GoogleCredentialSerializer
+    @transaction.atomic
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data); serializer.is_valid(raise_exception=True)
+        try: _, subject, email = verify_google_credential(serializer.validated_data["credential"])
+        except RuntimeError as error: return Response({"detail": str(error)}, status=503)
+        except ValueError: return Response({"detail": "Google could not verify this account."}, status=400)
+        if email.casefold() != request.user.email.casefold(): return Response({"detail": "Choose the Google account with the same email address."}, status=400)
+        if User.objects.filter(google_subject=subject).exclude(pk=request.user.pk).exists(): return Response({"detail": "That Google account is already connected elsewhere."}, status=409)
+        request.user.google_subject = subject; request.user.google_onboarding_completed = True
+        request.user.save(update_fields=["google_subject", "google_onboarding_completed"])
+        AuditLog.objects.create(actor=request.user, action="auth.google_linked", target_type="user", target_id=str(request.user.id), metadata={"provider": "google"})
+        return Response({"user": UserSerializer(request.user).data})
+
+class GoogleUnlinkView(APIView):
+    serializer_class = GoogleUnlinkSerializer
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data); serializer.is_valid(raise_exception=True)
+        if not request.user.google_subject: return Response({"detail": "Google is not connected."}, status=400)
+        if not request.user.has_usable_password() or not request.user.check_password(serializer.validated_data["password"]):
+            return Response({"detail": "Set and confirm your password before disconnecting Google."}, status=400)
+        request.user.google_subject = None; request.user.save(update_fields=["google_subject"])
+        AuditLog.objects.create(actor=request.user, action="auth.google_unlinked", target_type="user", target_id=str(request.user.id), metadata={"provider": "google"})
+        return Response({"user": UserSerializer(request.user).data})
+
+class AccountSecurityView(APIView):
+    def get(self, request):
+        activity = AuditLog.objects.filter(actor=request.user, action__startswith="auth.").order_by("-created_at")[:20]
+        return Response({"google_connected": bool(request.user.google_subject), "has_usable_password": request.user.has_usable_password(), "recent_activity": [{"action": row.action, "provider": row.metadata.get("provider", "password"), "created_at": row.created_at} for row in activity]})
 
 class LogoutView(APIView):
     def post(self, request):
@@ -416,7 +480,7 @@ class PublicStatusView(APIView):
         incidents = ServiceIncident.objects.filter(public=True).exclude(status="resolved").order_by("-started_at")
         services = [{"name": item.name, "status": "operational" if item.configured else "not_configured"} for item in provider_statuses()]
         services.insert(0, {"name": "api", "status": "operational"})
-        return Response({"overall": "degraded" if incidents.exists() else "operational", "updated_at": timezone.now(), "services": services, "incidents": [{"id": row.id, "title": row.title, "service": row.service, "status": row.status, "message": row.message, "started_at": row.started_at} for row in incidents]})
+        return Response({"overall": "degraded" if incidents.exists() else "operational", "updated_at": timezone.now(), "version": settings.APP_VERSION, "services": services, "incidents": [{"id": row.id, "title": row.title, "service": row.service, "status": row.status, "message": row.message, "started_at": row.started_at} for row in incidents]})
 
 class AdminOperationsMetrics(APIView):
     permission_classes = [IsAdmin]
@@ -1298,9 +1362,15 @@ class ExpertConsultationCreate(APIView):
         return Response({"id": consultation.id, "status": consultation.status, "starts_at": consultation.starts_at}, status=201)
 
 class DeleteAccountView(APIView):
+    serializer_class = PasswordCredentialSerializer
     def post(self, request):
-        password = str(request.data.get("password", ""))
-        if not request.user.check_password(password): return Response({"detail": "Incorrect password."}, status=400)
+        serializer = self.get_serializer(data=request.data); serializer.is_valid(raise_exception=True)
+        password, credential = serializer.validated_data.get("password", ""), serializer.validated_data.get("google_credential", "")
+        verified = bool(password and request.user.has_usable_password() and request.user.check_password(password))
+        if credential and request.user.google_subject:
+            try: _, subject, _ = verify_google_credential(credential); verified = subject == request.user.google_subject
+            except (RuntimeError, ValueError): verified = False
+        if not verified: return Response({"detail": "Confirm this account with its password or connected Google account."}, status=400)
         AccountDeletionRequest.objects.filter(user=request.user, used=False).update(used=True)
         code = f"{secrets.randbelow(1_000_000):06d}"
         deletion = AccountDeletionRequest.objects.create(user=request.user, expires_at=timezone.now() + timedelta(minutes=10))

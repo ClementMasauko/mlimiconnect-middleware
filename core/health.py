@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django.db import connection
+from django.conf import settings
 from django.http import JsonResponse
 from django.utils import timezone
 
@@ -8,7 +9,7 @@ from .models import OutboxMessage
 
 
 def liveness(_request):
-    return JsonResponse({"status": "ok"})
+    return JsonResponse({"status": "ok", "version": settings.APP_VERSION})
 
 
 def readiness(_request):
@@ -24,4 +25,4 @@ def readiness(_request):
     if oldest and oldest < timezone.now() - timedelta(minutes=15):
         checks["outbox"] = "backlogged"
     ready = checks["database"] == "ok"
-    return JsonResponse({"status": "ready" if ready else "unavailable", "checks": checks}, status=200 if ready else 503)
+    return JsonResponse({"status": "ready" if ready else "unavailable", "version": settings.APP_VERSION, "checks": checks}, status=200 if ready else 503)

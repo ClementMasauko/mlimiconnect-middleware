@@ -19,9 +19,12 @@ class UserSerializer(serializers.ModelSerializer):
     isBuyerVerified = serializers.BooleanField(source="is_buyer_verified", read_only=True)
     organization_status = serializers.SerializerMethodField()
     subscription = serializers.SerializerMethodField()
+    google_connected = serializers.SerializerMethodField()
+    has_usable_password = serializers.SerializerMethodField()
+    requires_onboarding = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ["id", "username", "email", "email_verified", "phone", "location", "user_type", "account_type", "can_buy", "can_sell", "organization_status", "isBuyerVerified", "is_seller_verified", "subscription"]
+        fields = ["id", "username", "email", "email_verified", "phone", "location", "user_type", "account_type", "can_buy", "can_sell", "organization_status", "isBuyerVerified", "is_seller_verified", "subscription", "google_connected", "has_usable_password", "requires_onboarding"]
         read_only_fields = ["id", "user_type", "account_type", "can_buy", "can_sell", "isBuyerVerified", "is_seller_verified"]
     def get_organization_status(self, obj) -> str | None:
         if obj.account_type == "individual": return None
@@ -29,6 +32,9 @@ class UserSerializer(serializers.ModelSerializer):
     def get_subscription(self, obj) -> dict:
         subscription, _ = Subscription.objects.get_or_create(user=obj)
         return SubscriptionSerializer(subscription).data
+    def get_google_connected(self, obj) -> bool: return bool(obj.google_subject)
+    def get_has_usable_password(self, obj) -> bool: return obj.has_usable_password()
+    def get_requires_onboarding(self, obj) -> bool: return bool(obj.google_subject and not obj.google_onboarding_completed)
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
@@ -93,6 +99,25 @@ class GoogleCredentialSerializer(serializers.Serializer):
 
 class GoogleLoginResponseSerializer(serializers.Serializer):
     user = UserSerializer()
+
+class GoogleOnboardingSerializer(serializers.Serializer):
+    account_type = serializers.CharField(max_length=20)
+    trading_mode = serializers.ChoiceField(choices=["buy", "sell", "both"])
+    phone = serializers.CharField(max_length=24, required=False, allow_blank=True)
+    location = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    organization = OrganizationSerializer(required=False)
+
+    def validate_account_type(self, value):
+        if value not in {"individual", "cooperative", "company"}:
+            raise serializers.ValidationError("Choose individual, cooperative, or company.")
+        return value
+
+class PasswordCredentialSerializer(serializers.Serializer):
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    google_credential = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=4096)
+
+class GoogleUnlinkSerializer(serializers.Serializer):
+    password = serializers.CharField(write_only=True)
 
 class WholesalePriceTierSerializer(serializers.ModelSerializer):
     class Meta:
