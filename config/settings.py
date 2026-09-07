@@ -8,6 +8,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "development-only-change-this-secret-key-before-production")
 DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
+ALLOW_DEMO_DATA = os.getenv("ALLOW_DEMO_DATA", "false").lower() == "true"
+PAYMENT_PENDING_TTL_MINUTES = int(os.getenv("PAYMENT_PENDING_TTL_MINUTES", "30"))
+FEATURE_AUCTIONS_ENABLED = os.getenv("FEATURE_AUCTIONS_ENABLED", "false").lower() == "true"
+FEATURE_SUBSCRIPTIONS_ENABLED = os.getenv("FEATURE_SUBSCRIPTIONS_ENABLED", "false").lower() == "true"
+FEATURE_EXPERT_REQUESTS_ENABLED = os.getenv("FEATURE_EXPERT_REQUESTS_ENABLED", "false").lower() == "true"
+FEATURE_PROMOTIONS_ENABLED = os.getenv("FEATURE_PROMOTIONS_ENABLED", "false").lower() == "true"
 ALLOWED_HOSTS = [v.strip() for v in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if v.strip()]
 
 INSTALLED_APPS = [
@@ -70,6 +76,8 @@ CSRF_COOKIE_SECURE = not DEBUG
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_SSL_REDIRECT = os.getenv("DJANGO_SECURE_SSL_REDIRECT", "false").lower() == "true"
 SECURE_HSTS_SECONDS = int(os.getenv("DJANGO_SECURE_HSTS_SECONDS", "0"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv("DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS", "true" if SECURE_HSTS_SECONDS else "false").lower() == "true"
+SECURE_HSTS_PRELOAD = os.getenv("DJANGO_SECURE_HSTS_PRELOAD", "true" if SECURE_HSTS_SECONDS else "false").lower() == "true"
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 SECURE_CROSS_ORIGIN_OPENER_POLICY = "same-origin"
@@ -80,13 +88,13 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle", "rest_framework.throttling.UserRateThrottle"],
-    "DEFAULT_THROTTLE_RATES": {"anon": "100/hour", "user": "1000/hour", "ussd": "120/minute", "geocoding": "10/minute"},
+    "DEFAULT_THROTTLE_RATES": {"anon": "100/hour", "user": "1000/hour", "ussd": "120/minute", "geocoding": "10/minute", "password_recovery": "5/hour", "password_reset_verify": "20/hour"},
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 24,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "EXCEPTION_HANDLER": "core.errors.api_exception_handler",
 }
-SPECTACULAR_SETTINGS = {"TITLE": "MlimiConnect API", "DESCRIPTION": "Versioned marketplace, advisory, logistics and administration API.", "VERSION": "1.0.0", "SERVE_INCLUDE_SCHEMA": False}
+SPECTACULAR_SETTINGS = {"TITLE": "MlimiConnect API", "DESCRIPTION": "Versioned marketplace, advisory, logistics and administration API.", "VERSION": "1.0.0", "SERVE_INCLUDE_SCHEMA": False, "PREPROCESSING_HOOKS": ["core.schema.only_versioned_api"]}
 PAYMENTS_ENABLED = os.getenv("PAYMENTS_ENABLED", "false").lower() == "true"
 PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "")
 E2E_MODE = os.getenv("E2E_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -136,6 +144,8 @@ TEXTBEE_API_URL = os.getenv("TEXTBEE_API_URL", "https://api.textbee.dev/api/v1")
 TEXTBEE_API_KEY = os.getenv("TEXTBEE_API_KEY", "")
 TEXTBEE_DEVICE_ID = os.getenv("TEXTBEE_DEVICE_ID", "")
 SMS_SENDER_NUMBER = os.getenv("SMS_SENDER_NUMBER", "")
+OUTBOX_INLINE = os.getenv("OUTBOX_INLINE", "true" if "test" in sys.argv else "false").lower() == "true"
+OUTBOX_MAX_ATTEMPTS = max(1, int(os.getenv("OUTBOX_MAX_ATTEMPTS", "5")))
 if "test" in sys.argv:
     EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
     SMS_ENABLED = False

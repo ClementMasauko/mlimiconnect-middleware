@@ -481,7 +481,7 @@ class ApiTests(TestCase):
         self.assertEqual(self.client.patch(f"/api/deliveries/{delivery_id}/status/", {"status": "picked_up"}, format="json").status_code, 200)
 
     def test_agricultural_listing_search_filters_normalized_price_and_expiry(self):
-        self.user.is_buyer_verified = True; self.user.save(update_fields=["is_buyer_verified"])
+        self.user.is_seller_verified = True; self.user.save(update_fields=["is_seller_verified"])
         listing = Listing.objects.create(seller=self.user, name="Certified Kilombero Rice", description="Aromatic harvest", price="100000", quantity=50, category="produce", unit="bag", pack_size="50", minimum_order=5, variety="Kilombero", grade="A", is_organic=True, available_from="2026-08-01", expiry_date="2027-01-01", approval_status="approved", latitude="-13.962600", longitude="33.774100", delivery_radius_km=100, allow_partial_fulfilment=True)
         WholesalePriceTier.objects.create(listing=listing, minimum_quantity=10, price_per_unit="90000")
         response = self.client.get("/api/marketplace/public-listings/?q=Kilombero&verified_only=true&organic=true&wholesale=true&available_on=2026-09-01&latitude=-13.96&longitude=33.77&radius_km=10")

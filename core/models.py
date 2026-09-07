@@ -16,6 +16,9 @@ class User(AbstractUser):
     can_buy = models.BooleanField(default=True)
     can_sell = models.BooleanField(default=False)
     is_buyer_verified = models.BooleanField(default=False)
+    is_seller_verified = models.BooleanField(default=False)
+    seller_verified_at = models.DateTimeField(null=True, blank=True)
+    seller_verified_by = models.ForeignKey("self", on_delete=models.PROTECT, null=True, blank=True, related_name="verified_sellers")
     email_verified = models.BooleanField(default=False)
 
 class EmailVerificationRequest(models.Model):
@@ -94,6 +97,9 @@ class PasswordResetRequest(models.Model):
     expires_at = models.DateTimeField()
     verified = models.BooleanField(default=False)
     used = models.BooleanField(default=False)
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+    locked_at = models.DateTimeField(null=True, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     def set_code(self, code): self.code_hash = make_password(code)
     def verify_code(self, code): return check_password(code, self.code_hash)
@@ -217,12 +223,29 @@ class Order(models.Model):
     total = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0"))
     payment_method = models.CharField(max_length=30)
     provider_reference = models.CharField(max_length=120, blank=True, unique=True, null=True)
+    payment_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    stock_restored_at = models.DateTimeField(null=True, blank=True)
     acceptance_deadline = models.DateTimeField(null=True, blank=True)
     cancellation_reason = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+class OrderFulfilment(models.Model):
+    STATUSES = Order.STATUSES
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="fulfilments")
+    seller = models.ForeignKey(User, on_delete=models.PROTECT, related_name="order_fulfilments")
+    status = models.CharField(max_length=20, choices=STATUSES, default="pending")
+    subtotal = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0"))
+    acceptance_deadline = models.DateTimeField(null=True, blank=True)
+    cancellation_reason = models.TextField(blank=True)
+    stock_restored_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["order", "seller"], name="unique_order_fulfilment_seller")]
+
 class OrderItem(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="items")
+    fulfilment = models.ForeignKey(OrderFulfilment, on_delete=models.PROTECT, null=True, blank=True, related_name="items")
     listing = models.ForeignKey(Listing, on_delete=models.PROTECT)
     quantity = models.PositiveIntegerField()
     fulfilled_quantity = models.PositiveIntegerField(default=0)
@@ -292,6 +315,28 @@ class MessageDelivery(models.Model):
     error_code = models.CharField(max_length=80, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+class OutboxMessage(models.Model):
+    CHANNELS = MessageDelivery.CHANNELS
+    STATUSES = [(value, value.title()) for value in ["pending", "processing", "sent", "failed"]]
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="outbox_messages")
+    channel = models.CharField(max_length=10, choices=CHANNELS)
+    category = models.CharField(max_length=40)
+    subject = models.CharField(max_length=180, blank=True)
+    body = models.TextField()
+    essential = models.BooleanField(default=False)
+    status = models.CharField(max_length=16, choices=STATUSES, default="pending", db_index=True)
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    available_at = models.DateTimeField(default=__import__("django.utils.timezone", fromlist=["now"]).now, db_index=True)
+    locked_at = models.DateTimeField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=160, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [models.Index(fields=["status", "available_at"], name="outbox_ready_idx")]
 
 class AdvisoryUsage(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="advisory_usage")
@@ -380,11 +425,14 @@ class HistoricalMarketPrice(models.Model):
         ]
 
 class OrderReview(models.Model):
-    order = models.OneToOneField(Order, on_delete=models.CASCADE, related_name="review")
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="reviews")
+    listing = models.ForeignKey(Listing, on_delete=models.PROTECT, related_name="reviews")
     reviewer = models.ForeignKey(User, on_delete=models.CASCADE)
     rating = models.PositiveSmallIntegerField()
     comment = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["order", "listing"], name="unique_order_listing_review")]
 
 class WalletTransaction(models.Model):
     TYPES = [(value, value.title()) for value in ["sale", "purchase", "withdrawal", "refund", "adjustment"]]
@@ -607,6 +655,65 @@ class Refund(models.Model):
     settled_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+class LedgerAccount(models.Model):
+    TYPES = [(value, value.title()) for value in ["asset", "liability", "revenue", "expense"]]
+    code = models.CharField(max_length=120, unique=True)
+    name = models.CharField(max_length=180)
+    account_type = models.CharField(max_length=16, choices=TYPES)
+    owner = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="ledger_accounts")
+    currency = models.CharField(max_length=3, default="MWK")
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+class LedgerTransaction(models.Model):
+    KINDS = [(value, value.replace("_", " ").title()) for value in ["payment", "refund", "settlement", "payout", "reversal", "adjustment"]]
+    reference = models.CharField(max_length=160, unique=True)
+    kind = models.CharField(max_length=20, choices=KINDS)
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, null=True, blank=True, related_name="ledger_transactions")
+    fulfilment = models.ForeignKey(OrderFulfilment, on_delete=models.PROTECT, null=True, blank=True, related_name="ledger_transactions")
+    description = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict)
+    posted_at = models.DateTimeField(auto_now_add=True)
+    reversed_by = models.OneToOneField("self", on_delete=models.PROTECT, null=True, blank=True, related_name="reverses")
+
+class LedgerPosting(models.Model):
+    DIRECTIONS = [("debit", "Debit"), ("credit", "Credit")]
+    transaction = models.ForeignKey(LedgerTransaction, on_delete=models.PROTECT, related_name="postings")
+    account = models.ForeignKey(LedgerAccount, on_delete=models.PROTECT, related_name="postings")
+    direction = models.CharField(max_length=6, choices=DIRECTIONS)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+        constraints = [models.CheckConstraint(condition=models.Q(amount__gt=0), name="ledger_posting_amount_positive")]
+
+class SellerSettlement(models.Model):
+    STATUSES = [(value, value.title()) for value in ["pending", "available", "paid", "held", "refunded"]]
+    fulfilment = models.OneToOneField(OrderFulfilment, on_delete=models.PROTECT, related_name="settlement")
+    seller = models.ForeignKey(User, on_delete=models.PROTECT, related_name="settlements")
+    gross_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    commission_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    net_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    commission_percent = models.DecimalField(max_digits=6, decimal_places=3)
+    status = models.CharField(max_length=16, choices=STATUSES, default="pending")
+    available_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+class Payout(models.Model):
+    STATUSES = [(value, value.title()) for value in ["requested", "submitted", "paid", "failed", "cancelled"]]
+    seller = models.ForeignKey(User, on_delete=models.PROTECT, related_name="payouts")
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    status = models.CharField(max_length=16, choices=STATUSES, default="requested")
+    provider = models.CharField(max_length=40)
+    provider_reference = models.CharField(max_length=120, unique=True)
+    destination_hint = models.CharField(max_length=40, blank=True)
+    requested_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="requested_payouts")
+    provider_payload = models.JSONField(default=dict)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    settlements = models.ManyToManyField(SellerSettlement, related_name="payouts")
 
 # Livestock records deliberately separate husbandry records from marketplace
 # listings. A farmer can therefore manage a herd without publishing animals for

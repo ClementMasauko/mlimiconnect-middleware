@@ -6,7 +6,7 @@ import uuid
 from urllib.request import Request, urlopen
 from django.conf import settings
 
-SENSITIVE_KEYS = re.compile(r"password|passcode|pin|secret|token|authorization|cookie|phone|email|financial|account|message", re.I)
+SENSITIVE_KEYS = re.compile(r"password|passcode|pin|secret|token|authorization|cookie|phone|email|financial|account", re.I)
 PHONE = re.compile(r"(?<!\d)(?:\+?265|0)?\d{9}(?!\d)")
 
 def redact(value, key=""):
@@ -45,6 +45,8 @@ class ObservabilityMiddleware:
         except Exception:
             duration = int((time.perf_counter()-started)*1000); self.logger.exception("Unhandled request error", extra={"correlation_id": correlation_id, "method": request.method, "path": request.path, "status_code": 500, "duration_ms": duration}); send_alert("Backend request failure", {"path": request.path, "status": 500}, correlation_id); raise
         duration = int((time.perf_counter()-started)*1000); response["X-Correlation-ID"] = correlation_id; response["Server-Timing"] = f"app;dur={duration}"
+        response.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+        response.setdefault("X-Content-Type-Options", "nosniff")
         self.logger.info("request.completed", extra={"correlation_id": correlation_id, "method": request.method, "path": request.path, "status_code": response.status_code, "duration_ms": duration})
         if response.status_code >= 500: send_alert("Backend 5xx response", {"path": request.path, "status": response.status_code}, correlation_id)
         try:

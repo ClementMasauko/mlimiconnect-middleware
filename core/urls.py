@@ -2,6 +2,7 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path("protected-files/<str:kind>/<int:object_id>/", views.ProtectedFileView.as_view(), name="protected-file"),
     path("csrf/", views.CsrfView.as_view()),
     path("auth/register/", views.RegisterView.as_view()),
     path("auth/verify-otp/", views.VerifyEmailView.as_view()),
@@ -85,6 +86,7 @@ urlpatterns = [
     path("analytics/overview/", views.AnalyticsOverview.as_view()),
     path("wallet/", views.WalletView.as_view()),
     path("wallet/withdrawals/", views.WithdrawalCreate.as_view()),
+    path("wallet/settlements/", views.SellerSettlementsView.as_view()),
     path("traceability/batches/", views.TraceabilityBatchListCreate.as_view()),
     path("traceability/batches/<int:pk>/", views.TraceabilityBatchDetail.as_view()),
     path("traceability/batches/<int:batch_id>/events/", views.TraceabilityEventCreate.as_view()),
@@ -95,6 +97,7 @@ urlpatterns = [
     path("admin/users/", views.AdminUsers.as_view()),
     path("admin/settings/", views.AdminSettingsView.as_view()),
     path("admin/listings/approvals/", views.AdminListingApprovals.as_view()),
+    path("admin/sellers/<int:user_id>/verification/", views.AdminSellerVerification.as_view()),
     path("admin/users/<int:user_id>/action/", views.AdminUserAction.as_view()),
     path("admin/users/<int:user_id>/role/", views.AdminRoleAssignment.as_view()),
     path("admin/fees/", views.AdminFees.as_view()),
@@ -109,6 +112,8 @@ urlpatterns = [
     path("admin/operations/incidents/", views.AdminIncidentsView.as_view()),
     path("admin/transporters/", views.AdminTransporters.as_view()),
     path("admin/reconciliations/", views.AdminReconciliations.as_view()),
+    path("admin/finance/", views.AdminFinanceOverview.as_view()),
+    path("admin/payouts/", views.AdminPayoutCreate.as_view()),
     path("admin/deliveries/", views.AdminDeliveries.as_view()),
     path("admin/orders/<int:order_id>/refunds/", views.AdminOrderRefund.as_view()),
     path("admin/refunds/<int:refund_id>/status/", views.AdminRefundStatus.as_view()),

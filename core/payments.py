@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from .models import Order, PaymentReconciliation
 from .order_lifecycle import transition_order
+from .finance import record_payment
 
 
 class PaymentProviderError(RuntimeError):
@@ -121,6 +122,7 @@ def verify_and_reconcile(tx_ref):
     order = reconciliation.order
     if order.status == "pending":
         order = transition_order(order.id, order.buyer, "paid", "Payment verified by PayChangu.", {"provider": "paychangu", "tx_ref": tx_ref}, system=True)
+        record_payment(order, tx_ref)
     return order, "matched"
 
 

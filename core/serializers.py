@@ -1,8 +1,14 @@
+from datetime import datetime, timedelta
+
+from django.conf import settings
 from django.contrib.auth import authenticate, password_validation
 from django.db import transaction
+from django.db.models import Avg, Count
+from django.utils import timezone
 from rest_framework import serializers
-from .models import ChatMessage, ContactMessage, Conversation, EmailVerificationRequest, Listing, NewsletterSubscription, Notification, Order, OrderItem, OrderReview, OrderStatusHistory, Organization, OrganizationMember, Subscription, TraceabilityBatch, TraceabilityEvent, User, WholesalePriceTier
+from .models import ChatMessage, ContactMessage, Conversation, EmailVerificationRequest, Listing, NewsletterSubscription, Notification, Order, OrderFulfilment, OrderItem, OrderReview, OrderStatusHistory, Organization, OrganizationMember, Subscription, TraceabilityBatch, TraceabilityEvent, User, WholesalePriceTier
 from .communications import deliver_security_code
+from .protected_files import protected_file_link
 
 class SubscriptionSerializer(serializers.ModelSerializer):
     class Meta:
@@ -15,12 +21,12 @@ class UserSerializer(serializers.ModelSerializer):
     subscription = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ["id", "username", "email", "email_verified", "phone", "location", "user_type", "account_type", "can_buy", "can_sell", "organization_status", "isBuyerVerified", "subscription"]
-        read_only_fields = ["id", "user_type", "account_type", "can_buy", "can_sell", "isBuyerVerified"]
-    def get_organization_status(self, obj):
+        fields = ["id", "username", "email", "email_verified", "phone", "location", "user_type", "account_type", "can_buy", "can_sell", "organization_status", "isBuyerVerified", "is_seller_verified", "subscription"]
+        read_only_fields = ["id", "user_type", "account_type", "can_buy", "can_sell", "isBuyerVerified", "is_seller_verified"]
+    def get_organization_status(self, obj) -> str | None:
         if obj.account_type == "individual": return None
         return obj.organization.verification_status if hasattr(obj, "organization") else "pending"
-    def get_subscription(self, obj):
+    def get_subscription(self, obj) -> dict:
         subscription, _ = Subscription.objects.get_or_create(user=obj)
         return SubscriptionSerializer(subscription).data
 
@@ -102,18 +108,29 @@ class ListingSerializer(serializers.ModelSerializer):
         model = Listing
         fields = ["id", "name", "description", "price", "quantity", "stock", "unit", "pack_size", "minimum_order", "harvest_date", "available_from", "expiry_date", "listing_expires_at", "grade", "variety", "moisture_content", "certification", "is_organic", "storage_conditions", "delivery_radius_km", "latitude", "longitude", "allow_partial_fulfilment", "wholesale_tiers", "normalized_price", "seller_verified", "category", "listing_type", "listingType", "condition", "image", "farmer", "location", "rating", "reviewsCount", "tag", "organization", "shared_with_team", "approval_status", "moderation_reason", "created_at"]
         read_only_fields = ["id", "organization", "shared_with_team", "approval_status", "moderation_reason", "created_at"]
-    def get_rating(self, _obj): return 5.0
-    def get_reviewsCount(self, _obj): return 0
-    def get_tag(self, _obj): return "New"
-    def get_normalized_price(self, obj):
+    def _review_summary(self, obj):
+        cached = getattr(obj, "_review_summary", None)
+        if cached is None:
+            cached = obj.reviews.aggregate(average=Avg("rating"), count=Count("id"))
+            obj._review_summary = cached
+        return cached
+    def get_rating(self, obj) -> float:
+        average = self._review_summary(obj)["average"]
+        return round(float(average), 1) if average is not None else 0
+    def get_reviewsCount(self, obj) -> int: return self._review_summary(obj)["count"]
+    def get_tag(self, obj) -> str: return "New" if obj.created_at >= timezone.now() - timedelta(days=7) else ""
+    def get_normalized_price(self, obj) -> str | None:
         multiplier = 1000 if obj.unit == "tonne" else 1
         return str(obj.price / (obj.pack_size * multiplier)) if obj.pack_size else None
-    def get_seller_verified(self, obj): return bool((obj.organization_id and obj.organization.verification_status == "verified") or obj.seller.is_buyer_verified)
-    def get_farmer(self, obj):
+    def get_seller_verified(self, obj) -> bool: return bool((obj.organization_id and obj.organization.verification_status == "verified") or obj.seller.is_seller_verified)
+    def get_farmer(self, obj) -> str:
         if obj.organization_id: return obj.organization.legal_name
         if obj.seller.account_type != "individual" and hasattr(obj.seller, "organization"): return obj.seller.organization.legal_name
         return obj.seller.username
     def validate(self, attrs):
+        listing_type = attrs.get("listing_type", getattr(self.instance, "listing_type", "fixed-price"))
+        if listing_type in ["auction", "both"] and not settings.FEATURE_AUCTIONS_ENABLED:
+            raise serializers.ValidationError({"listing_type": "Auction listings are not currently available."})
         if attrs.get("pack_size", getattr(self.instance, "pack_size", 1)) <= 0: raise serializers.ValidationError({"pack_size": "Pack size must be greater than zero."})
         if attrs.get("minimum_order", getattr(self.instance, "minimum_order", 1)) < 1: raise serializers.ValidationError({"minimum_order": "Minimum order must be at least one."})
         moisture = attrs.get("moisture_content", getattr(self.instance, "moisture_content", None))
@@ -142,7 +159,7 @@ class MessageSerializer(serializers.ModelSerializer):
         model = ChatMessage
         fields = ["id", "sender_id", "text", "created_at", "read_at"]
         read_only_fields = ["id", "sender_id", "created_at", "read_at"]
-    def get_read_at(self, obj): return obj.created_at if obj.read_by.exclude(id=obj.sender_id).exists() else None
+    def get_read_at(self, obj) -> datetime | None: return obj.created_at if obj.read_by.exclude(id=obj.sender_id).exists() else None
 
 class ConversationSerializer(serializers.ModelSerializer):
     participant = serializers.SerializerMethodField()
@@ -152,13 +169,13 @@ class ConversationSerializer(serializers.ModelSerializer):
         model = Conversation
         fields = ["id", "participant", "last_message", "unread_count", "updated_at"]
     def other(self, obj): return obj.participants.exclude(id=self.context["request"].user.id).first()
-    def get_participant(self, obj):
+    def get_participant(self, obj) -> dict | None:
         other = self.other(obj)
         return {"id": other.id, "username": other.username, "avatar": None, "online": False} if other else {"id": 0, "username": "Unknown"}
-    def get_last_message(self, obj):
+    def get_last_message(self, obj) -> dict | None:
         message = obj.messages.order_by("-created_at").first()
         return {"text": message.text, "created_at": message.created_at, "sender_id": message.sender_id} if message else None
-    def get_unread_count(self, obj): return obj.messages.exclude(sender=self.context["request"].user).exclude(read_by=self.context["request"].user).count()
+    def get_unread_count(self, obj) -> int: return obj.messages.exclude(sender=self.context["request"].user).exclude(read_by=self.context["request"].user).count()
 
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
@@ -197,10 +214,18 @@ class CheckoutSerializer(serializers.Serializer):
         listings = {item.id: item for item in Listing.objects.select_for_update().prefetch_related("wholesale_tiers").filter(id__in=[row["product_id"] for row in items], is_active=True, approval_status="approved").filter(__import__("django.db.models", fromlist=["Q"]).Q(listing_expires_at__isnull=True) | __import__("django.db.models", fromlist=["Q"]).Q(listing_expires_at__gt=now)).filter(__import__("django.db.models", fromlist=["Q"]).Q(available_from__isnull=True) | __import__("django.db.models", fromlist=["Q"]).Q(available_from__lte=today)).filter(__import__("django.db.models", fromlist=["Q"]).Q(expiry_date__isnull=True) | __import__("django.db.models", fromlist=["Q"]).Q(expiry_date__gte=today))}
         if len(listings) != len({row["product_id"] for row in items}):
             raise serializers.ValidationError("One or more listings are unavailable.")
+        if not settings.FEATURE_AUCTIONS_ENABLED and any(listing.listing_type in ["auction", "both"] for listing in listings.values()):
+            raise serializers.ValidationError("Auction checkout is not currently available.")
         subtotal = 0
         buyer = self.context["request"].user
         organization = buyer.organization if hasattr(buyer, "organization") else OrganizationMember.objects.filter(user=buyer, status="active", can_procure=True).values_list("organization", flat=True).first()
-        order = Order.objects.create(buyer=buyer, organization_id=getattr(organization, "id", organization), payment_method=validated_data["payment_method"])
+        order = Order.objects.create(
+            buyer=buyer,
+            organization_id=getattr(organization, "id", organization),
+            payment_method=validated_data["payment_method"],
+            payment_expires_at=timezone.now() + timedelta(minutes=settings.PAYMENT_PENDING_TTL_MINUTES),
+        )
+        fulfilments = {}
         for row in items:
             listing = listings[row["product_id"]]
             if row["quantity"] > listing.quantity:
@@ -208,12 +233,19 @@ class CheckoutSerializer(serializers.Serializer):
             if row["quantity"] < listing.minimum_order: raise serializers.ValidationError(f"Minimum order for {listing.name} is {listing.minimum_order} {listing.unit}.")
             tier = listing.wholesale_tiers.filter(minimum_quantity__lte=row["quantity"]).order_by("-minimum_quantity").first()
             unit_price = tier.price_per_unit if tier else listing.price
-            OrderItem.objects.create(order=order, listing=listing, quantity=row["quantity"], unit_price=unit_price)
+            fulfilment = fulfilments.get(listing.seller_id)
+            if fulfilment is None:
+                fulfilment = OrderFulfilment.objects.create(order=order, seller=listing.seller)
+                fulfilments[listing.seller_id] = fulfilment
+            line_total = unit_price * row["quantity"]
+            OrderItem.objects.create(order=order, fulfilment=fulfilment, listing=listing, quantity=row["quantity"], unit_price=unit_price)
+            fulfilment.subtotal += line_total
+            fulfilment.save(update_fields=["subtotal", "updated_at"])
             listing.quantity -= row["quantity"]
             if listing.quantity == 0:
                 listing.is_active = False
             listing.save(update_fields=["quantity", "is_active"])
-            subtotal += unit_price * row["quantity"]
+            subtotal += line_total
         order.subtotal = subtotal
         order.total = subtotal
         order.save(update_fields=["subtotal", "total"])
@@ -226,14 +258,28 @@ class OrderSerializer(serializers.ModelSerializer):
     delivery_evidence = serializers.SerializerMethodField()
     refunds = serializers.SerializerMethodField()
     payment_transaction = serializers.SerializerMethodField()
+    fulfilments = serializers.SerializerMethodField()
     class Meta:
         model = Order
-        fields = ["id", "status", "subtotal", "total", "payment_method", "payment_transaction", "acceptance_deadline", "cancellation_reason", "created_at", "items", "status_history", "delivery_evidence", "refunds"]
-    def get_items(self, obj): return [{"listing_id": item.listing_id, "name": item.listing.name, "quantity": item.quantity, "fulfilled_quantity": item.fulfilled_quantity, "unit_price": item.unit_price, "seller": item.listing.seller.username} for item in obj.items.select_related("listing__seller")]
-    def get_status_history(self, obj): return list(obj.status_history.values("from_status", "to_status", "reason", "created_at", actor_name=__import__("django.db.models", fromlist=["F"]).F("actor__username")))
-    def get_delivery_evidence(self, obj): return list(obj.delivery_evidence.values("id", "evidence_type", "file", "reference", "note", "location", "latitude", "longitude", "signature_name", "created_at"))
-    def get_refunds(self, obj): return list(obj.refunds.values("id", "amount", "provider", "provider_reference", "status", "settled_at", "created_at"))
-    def get_payment_transaction(self, obj):
+        fields = ["id", "status", "subtotal", "total", "payment_method", "payment_transaction", "payment_expires_at", "acceptance_deadline", "cancellation_reason", "created_at", "items", "fulfilments", "status_history", "delivery_evidence", "refunds"]
+    def get_items(self, obj) -> list[dict]: return [{"listing_id": item.listing_id, "fulfilment_id": item.fulfilment_id, "name": item.listing.name, "quantity": item.quantity, "fulfilled_quantity": item.fulfilled_quantity, "unit_price": item.unit_price, "seller": item.listing.seller.username} for item in obj.items.select_related("listing__seller")]
+    def get_fulfilments(self, obj) -> list[dict]: return list(obj.fulfilments.values("id", "seller_id", "seller__username", "status", "subtotal", "acceptance_deadline", "cancellation_reason", "created_at", "updated_at"))
+    def get_status_history(self, obj) -> list[dict]: return list(obj.status_history.values("from_status", "to_status", "reason", "created_at", actor_name=__import__("django.db.models", fromlist=["F"]).F("actor__username")))
+    def get_delivery_evidence(self, obj) -> list[dict]:
+        return [{
+            "id": row.id,
+            "evidence_type": row.evidence_type,
+            "file": protected_file_link("delivery-evidence", row.id) if row.file else "",
+            "reference": row.reference,
+            "note": row.note,
+            "location": row.location,
+            "latitude": row.latitude,
+            "longitude": row.longitude,
+            "signature_name": row.signature_name,
+            "created_at": row.created_at,
+        } for row in obj.delivery_evidence.all()]
+    def get_refunds(self, obj) -> list[dict]: return list(obj.refunds.values("id", "amount", "provider", "provider_reference", "status", "settled_at", "created_at"))
+    def get_payment_transaction(self, obj) -> dict | None:
         reconciliation = obj.reconciliations.order_by("-created_at").first()
         if not reconciliation:
             return None
@@ -253,9 +299,9 @@ class TraceabilityEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = TraceabilityEvent
         fields = ["id", "event_type", "stage", "description", "location", "quantity", "unit", "verification_status", "verified_at", "corrects", "previous_hash", "event_hash", "occurred_at", "actor", "evidence"]
-    def get_evidence(self, obj):
+    def get_evidence(self, obj) -> list[dict]:
         if self.context.get("public") and obj.verification_status != "verified": return []
-        return [{"id": row.id, "name": row.original_name, "content_type": row.content_type, "size": row.size, "sha256": row.sha256, "url": row.file.url} for row in obj.evidence.all()]
+        return [{"id": row.id, "name": row.original_name, "content_type": row.content_type, "size": row.size, "sha256": row.sha256, "url": protected_file_link("traceability-evidence", row.id)} for row in obj.evidence.all()]
 
 class TraceabilityBatchSerializer(serializers.ModelSerializer):
     events = TraceabilityEventSerializer(many=True, read_only=True)
@@ -264,16 +310,22 @@ class TraceabilityBatchSerializer(serializers.ModelSerializer):
         model = TraceabilityBatch
         fields = ["id", "batch_code", "product", "quantity", "status", "public_data", "created_at", "updated_at", "events", "integrity"]
         read_only_fields = ["id", "created_at", "updated_at", "events"]
-    def get_integrity(self, obj):
+    def get_integrity(self, obj) -> dict:
         from .traceability import verify_chain
         valid, broken_event_id = verify_chain(obj)
         return {"valid": valid, "broken_event_id": broken_event_id, "algorithm": "SHA-256", "event_count": obj.events.count()}
 
 class OrderReviewSerializer(serializers.ModelSerializer):
+    listing = serializers.PrimaryKeyRelatedField(queryset=Listing.objects.all(), required=False)
     class Meta:
         model = OrderReview
-        fields = ["id", "order", "rating", "comment", "created_at"]
+        fields = ["id", "order", "listing", "rating", "comment", "created_at"]
         read_only_fields = ["id", "created_at"]
     def validate_rating(self, value):
         if value < 1 or value > 5: raise serializers.ValidationError("Rating must be between 1 and 5.")
         return value
+    def validate(self, attrs):
+        order, listing = attrs.get("order"), attrs.get("listing")
+        if order and listing and not order.items.filter(listing=listing).exists():
+            raise serializers.ValidationError({"listing": "This listing is not part of the order."})
+        return attrs

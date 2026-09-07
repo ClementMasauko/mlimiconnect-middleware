@@ -25,7 +25,8 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.throttling import SimpleRateThrottle
-from .models import AccountDeletionRequest, AdvisoryUsage, AnimalRecord, AnimalWeightRecord, AnimalWelfareReport, AuditLog, ChatMessage, Conversation, CropDiagnosis, Delivery, DeliveryEvidence, DeliveryLocationUpdate, DeliveryQuote, DeliveryRating, DiagnosisEscalation, DiagnosisReport, Dispute, EmailVerificationRequest, ExpertConsultation, FavouriteListing, HerdFlock, HistoricalMarketPrice, Listing, LiveAnimalListingDetail, LivestockAlert, LivestockBreedingRecord, LivestockCatalogueEntry, LivestockDeliveryRequirement, LivestockFinancialRecord, LivestockHealthEvent, LivestockMovementRestriction, LivestockProductionRecord, LivestockProfile, NewsletterSubscription, Notification, NotificationPreference, OperationalEvent, Order, OrderReview, Organization, OrganizationDocument, OrganizationMember, PasswordResetRequest, PaymentReconciliation, PlatformSetting, RecentlyViewedListing, Refund, SavedSearch, ServiceIncident, SmartContract, Subscription, TeamApprovalRequest, TraceabilityAudit, TraceabilityBatch, TraceabilityEvent, TransporterDocument, TransporterProfile, USSDCredential, User, VaccinationReminder, WalletTransaction, WantedListing
+from drf_spectacular.utils import extend_schema, extend_schema_view
+from .models import AccountDeletionRequest, AdvisoryUsage, AnimalRecord, AnimalWeightRecord, AnimalWelfareReport, AuditLog, ChatMessage, Conversation, CropDiagnosis, Delivery, DeliveryEvidence, DeliveryLocationUpdate, DeliveryQuote, DeliveryRating, DiagnosisEscalation, DiagnosisReport, Dispute, EmailVerificationRequest, ExpertConsultation, FavouriteListing, HerdFlock, HistoricalMarketPrice, LedgerTransaction, Listing, LiveAnimalListingDetail, LivestockAlert, LivestockBreedingRecord, LivestockCatalogueEntry, LivestockDeliveryRequirement, LivestockFinancialRecord, LivestockHealthEvent, LivestockMovementRestriction, LivestockProductionRecord, LivestockProfile, NewsletterSubscription, Notification, NotificationPreference, OperationalEvent, Order, OrderReview, Organization, OrganizationDocument, OrganizationMember, PasswordResetRequest, PaymentReconciliation, Payout, PlatformSetting, RecentlyViewedListing, Refund, SavedSearch, SellerSettlement, ServiceIncident, SmartContract, Subscription, TeamApprovalRequest, TraceabilityAudit, TraceabilityBatch, TraceabilityEvent, TransporterDocument, TransporterProfile, USSDCredential, User, VaccinationReminder, WalletTransaction, WantedListing
 from .order_lifecycle import transition_order
 from .communications import deliver_security_code
 from .providers import provider_statuses
@@ -38,6 +39,7 @@ from .diagnosis import CONSENT_VERSION, DISCLAIMER, SUPPORTED_CROPS, DiagnosisEr
 from .geocoding import ATTRIBUTION, ATTRIBUTION_URL, GeocodingError, GeocodingRateLimited, read_selection, search_malawi, sign_selection
 from .payments import PaymentProviderError, extract_transaction_reference, initialize_checkout, verify_and_reconcile
 from .crop_planning import build_crop_plan
+from .protected_files import protected_file_link, serve_protected_file
 from .serializers import CheckoutSerializer, ContactSerializer, ConversationSerializer, ListingSerializer, LoginSerializer, MessageSerializer, NewsletterSerializer, NotificationSerializer, OrderReviewSerializer, OrderSerializer, OrganizationSerializer, RegisterSerializer, SubscriptionSerializer, TraceabilityBatchSerializer, UserSerializer
 
 # APIView does not provide serializer metadata. This empty default keeps every
@@ -57,6 +59,16 @@ class USSDRateThrottle(SimpleRateThrottle):
     scope="ussd"
     def get_cache_key(self,request,view):return self.cache_format%{"scope":self.scope,"ident":self.get_ident(request)}
 
+class PasswordRecoveryThrottle(SimpleRateThrottle):
+    scope = "password_recovery"
+    def get_cache_key(self, request, view):
+        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+
+class PasswordResetVerifyThrottle(SimpleRateThrottle):
+    scope = "password_reset_verify"
+    def get_cache_key(self, request, view):
+        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+
 def ussd_source_allowed(request):
     forwarded=request.META.get("HTTP_X_FORWARDED_FOR","").split(",")[0].strip();ip=forwarded or request.META.get("REMOTE_ADDR","");return not settings.USSD_ALLOWED_IPS or ip in settings.USSD_ALLOWED_IPS
 
@@ -64,6 +76,15 @@ class StandardPagination(PageNumberPagination):
     page_size = 24
     page_size_query_param = "page_size"
     max_page_size = 100
+
+def paginated_response(request, queryset, serialize):
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(queryset, request)
+    return paginator.get_paginated_response(serialize(page))
+
+class ProtectedFileView(APIView):
+    def get(self, request, kind, object_id):
+        return serve_protected_file(request, kind, object_id)
 
 def organization_access(user):
     if hasattr(user, "organization"): return user.organization, None
@@ -128,6 +149,7 @@ class PublicListingList(generics.ListAPIView):
     def get_queryset(self):
         today, now, params = timezone.localdate(), timezone.now(), self.request.query_params
         queryset = super().get_queryset().filter(Q(listing_expires_at__isnull=True) | Q(listing_expires_at__gt=now), Q(expiry_date__isnull=True) | Q(expiry_date__gte=today)).order_by("-created_at")
+        if not settings.FEATURE_AUCTIONS_ENABLED: queryset = queryset.filter(listing_type="fixed-price")
         query = str(params.get("q", "")).strip()
         if query: queryset = queryset.filter(Q(name__icontains=query) | Q(description__icontains=query) | Q(category__icontains=query) | Q(variety__icontains=query) | Q(grade__icontains=query) | Q(certification__icontains=query) | Q(seller__username__icontains=query))
         if params.get("category"): queryset = queryset.filter(category=params["category"])
@@ -137,7 +159,7 @@ class PublicListingList(generics.ListAPIView):
         if params.get("condition") == "used": queryset = queryset.filter(condition__startswith="used")
         if params.get("unit"): queryset = queryset.filter(unit=params["unit"])
         if params.get("available_on"): queryset = queryset.filter(Q(available_from__isnull=True) | Q(available_from__lte=params["available_on"]), Q(expiry_date__isnull=True) | Q(expiry_date__gte=params["available_on"]))
-        if params.get("verified_only") == "true": queryset = queryset.filter(Q(organization__verification_status="verified") | Q(seller__is_buyer_verified=True))
+        if params.get("verified_only") == "true": queryset = queryset.filter(Q(organization__verification_status="verified") | Q(seller__is_seller_verified=True))
         if params.get("organic") == "true": queryset = queryset.filter(is_organic=True)
         if params.get("wholesale") == "true": queryset = queryset.filter(wholesale_tiers__isnull=False).distinct()
         if params.get("minimum_wholesale_quantity"): queryset = queryset.filter(wholesale_tiers__minimum_quantity__lte=params["minimum_wholesale_quantity"]).distinct()
@@ -184,7 +206,9 @@ class ListingDetail(generics.RetrieveUpdateDestroyAPIView):
     def perform_destroy(self, instance): instance.is_active = False; instance.save(update_fields=["is_active"])
 
 class SavedSearchesView(APIView):
-    def get(self, request): return Response([{"id": row.id, "name": row.name, "filters": row.filters, "created_at": row.created_at} for row in request.user.saved_searches.order_by("-created_at")])
+    def get(self, request):
+        rows = request.user.saved_searches.order_by("-created_at")
+        return paginated_response(request, rows, lambda page: [{"id": row.id, "name": row.name, "filters": row.filters, "created_at": row.created_at} for row in page])
     def post(self, request):
         name, filters = str(request.data.get("name", "")).strip(), request.data.get("filters", {})
         if not name or not isinstance(filters, dict): return Response({"detail": "Search name and filter object are required."}, status=400)
@@ -196,7 +220,7 @@ class SavedSearchesView(APIView):
 class WantedListingsView(APIView):
     def get(self, request):
         rows = WantedListing.objects.filter(Q(status="open") | Q(buyer=request.user)).select_related("buyer").order_by("-created_at")
-        return Response([{"id": row.id, "buyer": row.buyer.username, "title": row.title, "description": row.description, "category": row.category, "quantity": row.quantity, "unit": row.unit, "maximum_price": row.maximum_price, "needed_by": row.needed_by, "location": row.location, "status": row.status, "created_at": row.created_at} for row in rows])
+        return paginated_response(request, rows, lambda page: [{"id": row.id, "buyer": row.buyer.username, "title": row.title, "description": row.description, "category": row.category, "quantity": row.quantity, "unit": row.unit, "maximum_price": row.maximum_price, "needed_by": row.needed_by, "location": row.location, "status": row.status, "created_at": row.created_at} for row in page])
     def post(self, request):
         try: quantity = int(request.data.get("quantity"))
         except (TypeError, ValueError): return Response({"detail": "Quantity must be a positive whole number."}, status=400)
@@ -213,7 +237,7 @@ class WantedListingsView(APIView):
 class FavouritesView(APIView):
     def get(self, request):
         rows = Listing.objects.filter(favourited_by__user=request.user, is_active=True).select_related("seller", "organization").prefetch_related("wholesale_tiers")
-        return Response(ListingSerializer(rows, many=True).data)
+        return paginated_response(request, rows, lambda page: ListingSerializer(page, many=True).data)
     def post(self, request):
         listing = generics.get_object_or_404(Listing, id=request.data.get("listing_id"), is_active=True)
         _, created = FavouriteListing.objects.get_or_create(user=request.user, listing=listing)
@@ -409,7 +433,11 @@ class AdminOrderRefund(APIView):
         if provider_status not in dict(Refund.STATUSES): return Response({"detail": "Invalid provider refund status."}, status=400)
         refund = Refund.objects.create(order=order, amount=amount, provider=provider, provider_reference=reference, reason=reason, requested_by=request.user, status=provider_status, provider_payload=request.data.get("provider_payload", {}))
         audit_change(actor=request.user, action="refund.created", target=refund, before={}, after=snapshot(refund, ["order", "amount", "provider", "provider_reference", "status"]), reason=reason)
-        if refund.status == "settled": refund.settled_at = timezone.now(); refund.save(update_fields=["settled_at"]); transition_order(order.id, request.user, "refunded", reason, {"refund_id": refund.id, "provider_reference": reference})
+        if refund.status == "settled":
+            refund.settled_at = timezone.now(); refund.save(update_fields=["settled_at"])
+            from .finance import record_refund
+            record_refund(refund)
+            transition_order(order.id, request.user, "refunded", reason, {"refund_id": refund.id, "provider_reference": reference})
         return Response({"id": refund.id, "status": refund.status, "provider_reference": refund.provider_reference}, status=201)
 
 class AdminRefundStatus(APIView):
@@ -426,14 +454,24 @@ class AdminRefundStatus(APIView):
         if next_status == "settled": refund.settled_at = timezone.now(); fields.append("settled_at")
         refund.save(update_fields=fields)
         audit_change(actor=request.user, action=f"refund.{next_status}", target=refund, before=before, after=snapshot(refund, ["status", "provider_payload", "settled_at"]), reason=refund.reason, extra={"provider_reference": refund.provider_reference})
-        if next_status == "settled" and refund.order.status != "refunded": transition_order(refund.order_id, request.user, "refunded", refund.reason, {"refund_id": refund.id, "provider_reference": refund.provider_reference})
+        if next_status == "settled" and refund.order.status != "refunded":
+            from .finance import record_refund
+            record_refund(refund)
+            transition_order(refund.order_id, request.user, "refunded", refund.reason, {"refund_id": refund.id, "provider_reference": refund.provider_reference})
         return Response({"id": refund.id, "status": refund.status, "settled_at": refund.settled_at})
 
 class OrderReviewCreate(generics.CreateAPIView):
     serializer_class = OrderReviewSerializer
     def perform_create(self, serializer):
-        order = generics.get_object_or_404(Order, id=self.request.data.get("order"), buyer=self.request.user, status="fulfilled")
-        serializer.save(order=order, reviewer=self.request.user)
+        order = generics.get_object_or_404(Order, id=self.request.data.get("order"), buyer=self.request.user, status__in=["completed", "fulfilled"])
+        listing_id = self.request.data.get("listing")
+        if listing_id:
+            listing = generics.get_object_or_404(Listing, id=listing_id, orderitem__order=order)
+        else:
+            listing_ids = list(order.items.values_list("listing_id", flat=True).distinct()[:2])
+            if len(listing_ids) != 1: raise serializers.ValidationError({"listing": "Choose which purchased listing to review."})
+            listing = Listing.objects.get(id=listing_ids[0])
+        serializer.save(order=order, listing=listing, reviewer=self.request.user)
 
 class DashboardOverview(APIView):
     def get(self, request):
@@ -540,6 +578,7 @@ def diagnosis_payload(row):
         "harmful_reported": row.reports.filter(category__in=["harmful_advice", "unsafe_pesticide"]).exists(),
     }
 
+@extend_schema_view(get=extend_schema(operation_id="diagnosis_list"), post=extend_schema(operation_id="diagnosis_create"))
 class CropDiagnosisListCreate(APIView):
     def get(self, request):
         rows = request.user.crop_diagnoses.prefetch_related("reports", "escalations").order_by("-created_at")[:100]
@@ -566,6 +605,7 @@ class CropDiagnosisListCreate(APIView):
         AuditLog.objects.create(actor=request.user, action="diagnosis.created", target_type="crop_diagnosis", target_id=str(row.id), metadata={"provider": "kindwise_crop_health", "consent_version": CONSENT_VERSION, "image_retained": False})
         return Response(diagnosis_payload(row), status=201)
 
+@extend_schema_view(get=extend_schema(operation_id="diagnosis_retrieve"), delete=extend_schema(operation_id="diagnosis_delete"))
 class CropDiagnosisDetail(APIView):
     def get(self, request, diagnosis_id):
         row = generics.get_object_or_404(CropDiagnosis.objects.prefetch_related("reports", "escalations"), id=diagnosis_id, user=request.user)
@@ -715,6 +755,23 @@ class AdminListingApprovals(APIView):
         audit_change(actor=request.user, action=f"listing.{decision}", target=listing, before=before, after=snapshot(listing, fields), reason=reason)
         return Response({"id": listing.id, "approval_status": decision})
 
+class AdminSellerVerification(APIView):
+    permission_classes = [IsAdmin]
+    @transaction.atomic
+    def post(self, request, user_id):
+        seller = generics.get_object_or_404(User.objects.select_for_update(), id=user_id, can_sell=True)
+        decision = request.data.get("decision")
+        reason = str(request.data.get("reason", "")).strip()
+        if decision not in ["verified", "rejected"] or len(reason) < 5:
+            return Response({"detail": "Choose verified or rejected and provide a reason of at least five characters."}, status=400)
+        before = snapshot(seller, ["is_seller_verified", "seller_verified_by", "seller_verified_at"])
+        seller.is_seller_verified = decision == "verified"
+        seller.seller_verified_by = request.user if decision == "verified" else None
+        seller.seller_verified_at = timezone.now() if decision == "verified" else None
+        seller.save(update_fields=["is_seller_verified", "seller_verified_by", "seller_verified_at"])
+        audit_change(actor=request.user, action=f"seller.{decision}", target=seller, before=before, after=snapshot(seller, ["is_seller_verified", "seller_verified_by", "seller_verified_at"]), reason=reason)
+        return Response({"id": seller.id, "is_seller_verified": seller.is_seller_verified})
+
 class AdminUserAction(APIView):
     permission_classes = [IsAdmin]
     @transaction.atomic
@@ -844,7 +901,7 @@ class DeliveryStatus(APIView):
 class TransporterDocumentsView(APIView):
     def get(self, request):
         profile = generics.get_object_or_404(TransporterProfile, user=request.user)
-        return Response([{"id": row.id, "document_type": row.document_type, "file": row.file.url, "verification_status": row.verification_status, "created_at": row.created_at} for row in profile.documents.order_by("-created_at")])
+        return Response([{"id": row.id, "document_type": row.document_type, "file": protected_file_link("transporter-document", row.id), "verification_status": row.verification_status, "created_at": row.created_at} for row in profile.documents.order_by("-created_at")])
     def post(self, request):
         profile = generics.get_object_or_404(TransporterProfile, user=request.user)
         upload = request.FILES.get("file")
@@ -977,6 +1034,56 @@ class AdminReconciliations(APIView):
         rows = PaymentReconciliation.objects.select_related("order").order_by("-created_at")
         return Response([{"id": row.id, "order_id": row.order_id, "provider": row.provider, "provider_reference": row.provider_reference, "expected_amount": row.expected_amount, "settled_amount": row.settled_amount, "status": row.status, "created_at": row.created_at} for row in rows])
 
+class SellerSettlementsView(APIView):
+    def get(self, request):
+        rows = SellerSettlement.objects.filter(seller=request.user).select_related("fulfilment__order").order_by("-created_at")
+        return Response({
+            "available": rows.filter(status="available").aggregate(value=Sum("net_amount"))["value"] or 0,
+            "pending": rows.filter(status="pending").aggregate(value=Sum("net_amount"))["value"] or 0,
+            "results": list(rows.values("id", "fulfilment_id", "fulfilment__order_id", "gross_amount", "commission_amount", "net_amount", "commission_percent", "status", "available_at", "created_at")),
+        })
+
+class AdminFinanceOverview(APIView):
+    permission_classes = [IsAdmin]
+    def get(self, request):
+        imbalanced = []
+        for row in LedgerTransaction.objects.prefetch_related("postings").order_by("-posted_at")[:1000]:
+            debit = sum((posting.amount for posting in row.postings.all() if posting.direction == "debit"), Decimal("0"))
+            credit = sum((posting.amount for posting in row.postings.all() if posting.direction == "credit"), Decimal("0"))
+            if debit != credit:
+                imbalanced.append({"id": row.id, "reference": row.reference, "debit": debit, "credit": credit})
+        return Response({
+            "unmatched_reconciliations": PaymentReconciliation.objects.exclude(status="matched").count(),
+            "refunds_in_progress": Refund.objects.filter(status__in=["requested", "submitted"]).count(),
+            "settlements": list(SellerSettlement.objects.values("status").annotate(count=Count("id"), amount=Sum("net_amount")).order_by("status")),
+            "payouts": list(Payout.objects.values("status").annotate(count=Count("id"), amount=Sum("amount")).order_by("status")),
+            "ledger_imbalances": imbalanced,
+        })
+
+class AdminPayoutCreate(APIView):
+    permission_classes = [IsAdmin]
+    def post(self, request):
+        seller = generics.get_object_or_404(User, id=request.data.get("seller_id"))
+        settlement_ids = request.data.get("settlement_ids", [])
+        settlements = list(SellerSettlement.objects.filter(id__in=settlement_ids))
+        provider = str(request.data.get("provider", "")).strip()
+        reference = str(request.data.get("provider_reference", "")).strip()
+        payout_status = request.data.get("status", "submitted")
+        if not settlement_ids or len(settlements) != len(set(settlement_ids)) or not provider or not reference or payout_status not in ["submitted", "paid"]:
+            return Response({"detail": "Seller, available settlements, provider, unique reference and valid status are required."}, status=400)
+        try:
+            from .finance import create_payout
+            payout = create_payout(
+                seller=seller, settlements=settlements, provider=provider,
+                provider_reference=reference, requested_by=request.user,
+                destination_hint=str(request.data.get("destination_hint", ""))[:40],
+                status=payout_status, provider_payload=request.data.get("provider_payload", {}),
+            )
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=409)
+        audit_change(actor=request.user, action="payout.created", target=payout, before={}, after=snapshot(payout, ["seller", "amount", "status", "provider", "provider_reference"]), reason=str(request.data.get("reason", "Payout processed.")))
+        return Response({"id": payout.id, "amount": payout.amount, "status": payout.status, "provider_reference": payout.provider_reference}, status=201)
+
 class AdminDeliveries(APIView):
     permission_classes = [IsAdmin]
     def get(self, request):
@@ -1075,11 +1182,13 @@ PLAN_CREDITS = {"farmer-plus": 1, "cooperative": 3, "organization": 5, "enterpri
 
 class SubscriptionMe(APIView):
     def get(self, request):
+        if not settings.FEATURE_SUBSCRIPTIONS_ENABLED: return Response({"detail": "Subscriptions are not currently available."}, status=503)
         subscription, _ = Subscription.objects.get_or_create(user=request.user)
         return Response(SubscriptionSerializer(subscription).data)
 
 class SubscriptionCheckout(APIView):
     def post(self, request):
+        if not settings.FEATURE_SUBSCRIPTIONS_ENABLED: return Response({"detail": "Subscriptions are not currently available."}, status=503)
         plan = request.data.get("plan_id"); cycle = request.data.get("billing_cycle", "monthly"); method = request.data.get("payment_method")
         if plan not in PLAN_FEATURES or plan == "free": return Response({"detail": "Select a paid plan."}, status=400)
         allowed = ["airtel_money", "tnm_mpamba", "card"] if request.user.account_type == "individual" else ["airtel_money", "tnm_mpamba", "card", "bank_transfer", "invoice"]
@@ -1090,6 +1199,7 @@ class SubscriptionCheckout(APIView):
 
 class SubscriptionCancel(APIView):
     def post(self, request):
+        if not settings.FEATURE_SUBSCRIPTIONS_ENABLED: return Response({"detail": "Subscriptions are not currently available."}, status=503)
         subscription, _ = Subscription.objects.get_or_create(user=request.user); subscription.status = "cancelled"; subscription.save(update_fields=["status"])
         return Response(SubscriptionSerializer(subscription).data)
 
@@ -1108,7 +1218,8 @@ class CropPlanning(APIView):
         return Response(result)
 
 class ExpertConsultationCreate(APIView):
-    def create(self, request, *args, **kwargs):
+    def post(self, request, *args, **kwargs):
+        if not settings.FEATURE_EXPERT_REQUESTS_ENABLED: return Response({"detail": "Expert requests are not currently available."}, status=503)
         subscription, _ = Subscription.objects.get_or_create(user=request.user)
         credits = PLAN_CREDITS.get(subscription.plan_id, 0)
         if subscription.status != "active" or not credits: return Response({"detail": "Your active plan does not include expert consultations."}, status=403)
@@ -1214,7 +1325,7 @@ class OrganizationApprovalsView(APIView):
 class OrganizationDocumentsView(APIView):
     def get(self, request):
         organization, _ = require_organization_permission(request.user)
-        return Response([{"id": row.id, "document_type": row.document_type, "file": row.file.url, "created_at": row.created_at} for row in organization.documents.order_by("-created_at")])
+        return Response([{"id": row.id, "document_type": row.document_type, "file": protected_file_link("organization-document", row.id), "created_at": row.created_at} for row in organization.documents.order_by("-created_at")])
     def post(self, request):
         organization, _ = require_organization_permission(request.user, "can_manage_members")
         upload = request.FILES.get("file")
@@ -1328,6 +1439,8 @@ class AdminUSSDRecoveryView(APIView):
 class ForgotPasswordView(APIView):
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
+    throttle_classes = [PasswordRecoveryThrottle]
+    @transaction.atomic
     def post(self, request):
         method = request.data.get("method")
         if method not in {"email", "phone"}: return Response({"detail": "Choose email or phone recovery."}, status=400)
@@ -1339,6 +1452,14 @@ class ForgotPasswordView(APIView):
             identifier = identifier if identifier.startswith("+265") else f"+265{identifier[1:]}" if identifier.startswith("0") else identifier
             user = User.objects.filter(phone=identifier, is_active=True).first()
         if user:
+            recent = PasswordResetRequest.objects.filter(
+                user=user,
+                used=False,
+                created_at__gte=timezone.now() - timedelta(seconds=60),
+            ).exists()
+            if recent:
+                return Response({"message": "If that account exists, a reset code has been sent."})
+            PasswordResetRequest.objects.filter(user=user, used=False).update(used=True)
             code = f"{secrets.randbelow(1_000_000):06d}"
             reset = PasswordResetRequest.objects.create(user=user, expires_at=timezone.now() + timedelta(minutes=10))
             reset.set_code(code); reset.save(update_fields=["code_hash"])
@@ -1346,23 +1467,36 @@ class ForgotPasswordView(APIView):
             deliver_security_code(user, "MlimiConnect password reset", f"Your reset code is {code}. Open {link}. It expires in 10 minutes.", f"MlimiConnect password reset code: {code}. It expires in 10 minutes. Never share this code.", "security")
         return Response({"message": "If that account exists, a reset code has been sent."})
 
-def valid_reset(data):
-    try: reset = PasswordResetRequest.objects.select_related("user").filter(token=data.get("token"), used=False, expires_at__gt=timezone.now()).first()
+def valid_reset(data, record_failure=True):
+    try: reset = PasswordResetRequest.objects.select_for_update().select_related("user").filter(token=data.get("token"), used=False, expires_at__gt=timezone.now(), locked_at=None).first()
     except (DjangoValidationError, TypeError, ValueError): return None
-    return reset if reset and reset.verify_code(str(data.get("otp", ""))) else None
+    if not reset: return None
+    if reset.verify_code(str(data.get("otp", ""))): return reset
+    if record_failure:
+        reset.failed_attempts += 1
+        fields = ["failed_attempts"]
+        if reset.failed_attempts >= 5:
+            reset.locked_at = timezone.now()
+            fields.append("locked_at")
+        reset.save(update_fields=fields)
+    return None
 
 class VerifyResetCodeView(APIView):
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
+    throttle_classes = [PasswordResetVerifyThrottle]
+    @transaction.atomic
     def post(self, request):
         reset = valid_reset(request.data)
         if not reset: return Response({"detail": "Invalid or expired code."}, status=400)
-        reset.verified = True; reset.save(update_fields=["verified"])
+        reset.verified = True; reset.verified_at = timezone.now(); reset.save(update_fields=["verified", "verified_at"])
         return Response({"verified": True})
 
 class ResetPasswordView(APIView):
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
+    throttle_classes = [PasswordResetVerifyThrottle]
+    @transaction.atomic
     def post(self, request):
         reset = valid_reset(request.data)
         if not reset or not reset.verified: return Response({"detail": "Verify the reset code first."}, status=400)
@@ -1402,6 +1536,7 @@ class LivestockProfileView(APIView):
             request.user.can_sell = True; request.user.user_type = "farmer"; request.user.save(update_fields=["can_sell", "user_type"])
         return self.get(request)
 
+@extend_schema_view(get=extend_schema(operation_id="herd_list"), post=extend_schema(operation_id="herd_create"))
 class HerdFlockListCreate(APIView):
     def get(self, request): return Response([_herd_data(row) for row in HerdFlock.objects.filter(owner=request.user).order_by("-updated_at")])
     def post(self, request):
@@ -1416,6 +1551,7 @@ class HerdFlockListCreate(APIView):
         Notification.objects.create(user=request.user, type="livestock", title="Herd or flock added", message=f"{row.name} is ready for animal, health, and production records.", action_url="/app/livestock")
         return Response(_herd_data(row), status=201)
 
+@extend_schema_view(get=extend_schema(operation_id="herd_retrieve"), patch=extend_schema(operation_id="herd_update"))
 class HerdFlockDetail(APIView):
     def get(self, request, herd_id): return Response(_herd_data(_herd_for(request.user, herd_id), True))
     def patch(self, request, herd_id):

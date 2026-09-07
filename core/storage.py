@@ -62,6 +62,11 @@ class AdaptiveCloudinaryStorage(Storage):
             saved_id = f"{saved_id}.{saved_format}"
         return f"{resource_type}/{saved_id}"
 
+    def _open(self, name, mode="rb"):
+        if self.cloudinary_enabled:
+            raise NotImplementedError("Cloudinary protected files are served through short-lived signed URLs.")
+        return self.local.open(name, mode)
+
     def url(self, name):
         if not self.cloudinary_enabled:
             return self.local.url(name)

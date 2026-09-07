@@ -1,13 +1,16 @@
 import json
 import logging
+from datetime import timedelta
 from email.utils import parseaddr
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from django.conf import settings
 from django.core.mail import get_connection, send_mail
+from django.db import transaction
+from django.utils import timezone
 
-from .models import MessageDelivery, NotificationPreference
+from .models import MessageDelivery, NotificationPreference, OutboxMessage
 
 logger = logging.getLogger("mlimiconnect")
 
@@ -102,12 +105,87 @@ def deliver_sms(user, message, category, essential=False):
 
 
 def deliver_security_code(user, subject, email_message, sms_message, category):
-    email = deliver_email(user, subject, email_message, category, essential=True)
-    sms = deliver_sms(user, sms_message, category, essential=True)
+    email = enqueue_delivery(user, "email", category, email_message, subject=subject, essential=True)
+    sms = enqueue_delivery(user, "sms", category, sms_message, essential=True)
     return email, sms
 
 
 def deliver_order_update(user, order, previous, current):
     message = f"MlimiConnect: Order #{order.id} changed from {previous.replace('_', ' ')} to {current.replace('_', ' ')}."
-    deliver_email(user, f"Order #{order.id} updated", message, "orders")
-    deliver_sms(user, message, "orders")
+    enqueue_delivery(user, "email", "orders", message, subject=f"Order #{order.id} updated")
+    enqueue_delivery(user, "sms", "orders", message)
+
+
+def enqueue_delivery(user, channel, category, body, subject="", essential=False):
+    """Persist a message in the same transaction as the event that created it."""
+    recipient = user.email if channel == "email" else user.phone
+    if not recipient or not channel_enabled(user, channel, category, essential):
+        return None
+    message = OutboxMessage.objects.create(
+        user=user,
+        channel=channel,
+        category=category,
+        subject=subject,
+        body=body,
+        essential=essential,
+    )
+    if settings.OUTBOX_INLINE:
+        process_outbox_message(message.id)
+        message.refresh_from_db()
+    return message
+
+
+def process_outbox_message(message_id):
+    now = timezone.now()
+    with transaction.atomic():
+        message = OutboxMessage.objects.select_for_update().select_related("user").filter(
+            id=message_id,
+            status__in=["pending", "processing"],
+            available_at__lte=now,
+        ).first()
+        if not message:
+            return False
+        message.status = "processing"
+        message.locked_at = now
+        message.attempt_count += 1
+        message.save(update_fields=["status", "locked_at", "attempt_count", "updated_at"])
+
+    try:
+        if not message.user:
+            raise RuntimeError("recipient_deleted")
+        delivery = (
+            deliver_email(message.user, message.subject, message.body, message.category, message.essential)
+            if message.channel == "email"
+            else deliver_sms(message.user, message.body, message.category, message.essential)
+        )
+        if delivery is not None and delivery.status == "failed":
+            raise RuntimeError(delivery.error_code or "provider_rejected")
+    except Exception as error:
+        message.last_error = type(error).__name__ if not str(error) else str(error)[:160]
+        if message.attempt_count >= settings.OUTBOX_MAX_ATTEMPTS:
+            message.status = "failed"
+        else:
+            message.status = "pending"
+            message.available_at = now + timedelta(seconds=min(3600, 30 * (2 ** (message.attempt_count - 1))))
+        message.locked_at = None
+        message.save(update_fields=["status", "available_at", "locked_at", "last_error", "updated_at"])
+        return False
+
+    message.status = "sent"
+    message.sent_at = timezone.now()
+    message.locked_at = None
+    message.last_error = ""
+    message.save(update_fields=["status", "sent_at", "locked_at", "last_error", "updated_at"])
+    return True
+
+
+def process_pending_outbox(limit=100):
+    now = timezone.now()
+    stale_before = now - timedelta(minutes=10)
+    OutboxMessage.objects.filter(status="processing", locked_at__lt=stale_before).update(status="pending", locked_at=None)
+    message_ids = list(
+        OutboxMessage.objects.filter(status="pending", available_at__lte=now)
+        .order_by("created_at")
+        .values_list("id", flat=True)[:limit]
+    )
+    return sum(1 for message_id in message_ids if process_outbox_message(message_id))

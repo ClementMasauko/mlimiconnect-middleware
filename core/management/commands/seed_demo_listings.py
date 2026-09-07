@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.core.management.base import BaseCommand
+from django.conf import settings
 
 from core.models import AuditLog, Listing, User, WholesalePriceTier
 
@@ -37,6 +38,11 @@ class Command(BaseCommand):
     help = "Create three clearly labelled, approved listings for sandbox checkout testing."
 
     def handle(self, *args, **options):
+        if not settings.ALLOW_DEMO_DATA:
+            self.stderr.write(self.style.ERROR(
+                "Demo seeding is disabled. Set ALLOW_DEMO_DATA=true only in an isolated sandbox."
+            ))
+            return
         seller, created = User.objects.get_or_create(
             username="mlimiconnect_demo_seller",
             defaults={
