@@ -29,7 +29,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.throttling import SimpleRateThrottle
 from drf_spectacular.utils import extend_schema, extend_schema_view
-from .models import AccountDeletionRequest, AdvisoryUsage, AnimalRecord, AnimalWeightRecord, AnimalWelfareReport, AuditLog, ChatMessage, Conversation, CropDiagnosis, Delivery, DeliveryEvidence, DeliveryLocationUpdate, DeliveryQuote, DeliveryRating, DiagnosisEscalation, DiagnosisReport, Dispute, EmailVerificationRequest, ExpertConsultation, FavouriteListing, HerdFlock, HistoricalMarketPrice, LedgerTransaction, Listing, LiveAnimalListingDetail, LivestockAlert, LivestockBreedingRecord, LivestockCatalogueEntry, LivestockDeliveryRequirement, LivestockFinancialRecord, LivestockHealthEvent, LivestockMovementRestriction, LivestockProductionRecord, LivestockProfile, NewsletterSubscription, Notification, NotificationPreference, OperationalEvent, Order, OrderReview, Organization, OrganizationDocument, OrganizationMember, PasswordResetRequest, PaymentReconciliation, Payout, PlatformSetting, RecentlyViewedListing, Refund, SavedSearch, SellerSettlement, ServiceIncident, SmartContract, Subscription, TeamApprovalRequest, TraceabilityAudit, TraceabilityBatch, TraceabilityEvent, TransporterDocument, TransporterProfile, USSDCredential, User, VaccinationReminder, WalletTransaction, WantedListing
+from .models import AccountDeletionRequest, AdvisoryUsage, AnimalRecord, AnimalWeightRecord, AnimalWelfareReport, AuditLog, ChatMessage, Conversation, CropDiagnosis, Delivery, DeliveryEvidence, DeliveryLocationUpdate, DeliveryQuote, DeliveryRating, DiagnosisEscalation, DiagnosisReport, Dispute, EmailVerificationRequest, ExpertConsultation, FavouriteListing, HerdFlock, HistoricalMarketPrice, LedgerTransaction, Listing, LiveAnimalListingDetail, LivestockAlert, LivestockBreedingRecord, LivestockCatalogueEntry, LivestockDeliveryRequirement, LivestockFinancialRecord, LivestockHealthEvent, LivestockMovementRestriction, LivestockProductionRecord, LivestockProfile, NewsletterSubscription, Notification, NotificationPreference, OperationalEvent, Order, OrderReview, Organization, OrganizationDocument, OrganizationMember, PasswordResetRequest, PaymentReconciliation, Payout, PlatformSetting, RecentlyViewedListing, Refund, SavedSearch, SellerSettlement, ServiceIncident, SmartContract, Subscription, TeamApprovalRequest, TraceabilityAudit, TraceabilityBatch, TraceabilityEvent, TransporterDocument, TransporterProfile, TwoFactorLoginChallenge, USSDCredential, User, VaccinationReminder, WalletTransaction, WantedListing
 from .order_lifecycle import transition_order
 from .communications import deliver_security_code
 from .providers import provider_statuses
@@ -43,7 +43,8 @@ from .geocoding import ATTRIBUTION, ATTRIBUTION_URL, GeocodingError, GeocodingRa
 from .payments import PaymentProviderError, extract_transaction_reference, initialize_checkout, verify_and_reconcile
 from .crop_planning import build_crop_plan
 from .protected_files import protected_file_link, serve_protected_file
-from .serializers import CheckoutSerializer, ContactSerializer, ConversationSerializer, GoogleCredentialSerializer, GoogleLoginResponseSerializer, GoogleOnboardingSerializer, GoogleUnlinkSerializer, ListingSerializer, LoginSerializer, MessageSerializer, NewsletterSerializer, NotificationSerializer, OrderReviewSerializer, OrderSerializer, OrganizationSerializer, PasswordCredentialSerializer, RegisterSerializer, SubscriptionSerializer, TraceabilityBatchSerializer, UserSerializer
+from .serializers import CheckoutSerializer, ContactSerializer, ConversationSerializer, GoogleCredentialSerializer, GoogleLoginResponseSerializer, GoogleOnboardingSerializer, GoogleUnlinkSerializer, ListingSerializer, LoginSerializer, MessageSerializer, NewsletterSerializer, NotificationSerializer, OrderReviewSerializer, OrderSerializer, OrganizationSerializer, PasswordCredentialSerializer, RegisterSerializer, SubscriptionSerializer, TraceabilityBatchSerializer, TwoFactorChallengeSerializer, TwoFactorCodeSerializer, TwoFactorDisableSerializer, UserSerializer
+from .two_factor import consume_recovery_code, create_recovery_codes, decrypt_secret, encrypt_secret, generate_secret, provisioning_uri, verify_totp
 
 # APIView does not provide serializer metadata. This empty default keeps every
 # custom endpoint present in the generated OpenAPI document; concrete generic
@@ -69,6 +70,11 @@ class PasswordRecoveryThrottle(SimpleRateThrottle):
 
 class PasswordResetVerifyThrottle(SimpleRateThrottle):
     scope = "password_reset_verify"
+    def get_cache_key(self, request, view):
+        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+
+class TwoFactorThrottle(SimpleRateThrottle):
+    scope = "two_factor"
     def get_cache_key(self, request, view):
         return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
 
@@ -131,6 +137,9 @@ class LoginView(APIView):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
+        if user.two_factor_enabled:
+            challenge = TwoFactorLoginChallenge.objects.create(user=user, expires_at=timezone.now() + timedelta(minutes=5))
+            return Response({"two_factor_required": True, "challenge_token": challenge.token})
         login(request, user)
         return Response({"user": UserSerializer(user).data})
 
@@ -190,6 +199,9 @@ class GoogleLoginView(APIView):
 
         if not user.is_active:
             return Response({"detail": "This account is inactive."}, status=status.HTTP_403_FORBIDDEN)
+        if user.two_factor_enabled:
+            challenge = TwoFactorLoginChallenge.objects.create(user=user, expires_at=timezone.now() + timedelta(minutes=5))
+            return Response({"two_factor_required": True, "challenge_token": challenge.token})
         login(request, user, backend="django.contrib.auth.backends.ModelBackend")
         AuditLog.objects.create(actor=user, action="auth.google_login", target_type="user", target_id=str(user.id), metadata={"provider": "google", "success": True})
         return Response({"user": UserSerializer(user).data})
@@ -253,7 +265,66 @@ class GoogleUnlinkView(APIView):
 class AccountSecurityView(APIView):
     def get(self, request):
         activity = AuditLog.objects.filter(actor=request.user, action__startswith="auth.").order_by("-created_at")[:20]
-        return Response({"google_connected": bool(request.user.google_subject), "has_usable_password": request.user.has_usable_password(), "recent_activity": [{"action": row.action, "provider": row.metadata.get("provider", "password"), "created_at": row.created_at} for row in activity]})
+        return Response({"google_connected": bool(request.user.google_subject), "has_usable_password": request.user.has_usable_password(), "two_factor_enabled": request.user.two_factor_enabled, "recovery_codes_remaining": len(request.user.two_factor_recovery_codes), "recent_activity": [{"action": row.action, "provider": row.metadata.get("provider", "password"), "created_at": row.created_at} for row in activity]})
+
+class TwoFactorSetupView(APIView):
+    def post(self, request):
+        if request.user.two_factor_enabled: return Response({"detail": "Two-factor authentication is already enabled."}, status=400)
+        secret = generate_secret()
+        request.user.two_factor_pending_secret = encrypt_secret(secret)
+        request.user.save(update_fields=["two_factor_pending_secret"])
+        return Response({"secret": secret, "provisioning_uri": provisioning_uri(secret, request.user.email)})
+
+class TwoFactorConfirmView(APIView):
+    serializer_class = TwoFactorCodeSerializer
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data); serializer.is_valid(raise_exception=True)
+        if not request.user.two_factor_pending_secret: return Response({"detail": "Start authenticator setup first."}, status=400)
+        try: secret = decrypt_secret(request.user.two_factor_pending_secret)
+        except Exception: return Response({"detail": "Authenticator setup expired. Start again."}, status=400)
+        if not verify_totp(secret, serializer.validated_data["code"]): return Response({"detail": "The authenticator code is incorrect."}, status=400)
+        recovery_codes, encoded_codes = create_recovery_codes()
+        request.user.two_factor_secret = request.user.two_factor_pending_secret
+        request.user.two_factor_pending_secret = ""
+        request.user.two_factor_enabled = True
+        request.user.two_factor_recovery_codes = encoded_codes
+        request.user.save(update_fields=["two_factor_secret", "two_factor_pending_secret", "two_factor_enabled", "two_factor_recovery_codes"])
+        AuditLog.objects.create(actor=request.user, action="auth.two_factor_enabled", target_type="user", target_id=str(request.user.id), metadata={"provider": "authenticator"})
+        return Response({"recovery_codes": recovery_codes})
+
+class TwoFactorDisableView(APIView):
+    serializer_class = TwoFactorDisableSerializer
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data); serializer.is_valid(raise_exception=True)
+        user, code, password = request.user, serializer.validated_data["code"], serializer.validated_data.get("password", "")
+        if not user.two_factor_enabled: return Response({"detail": "Two-factor authentication is not enabled."}, status=400)
+        if user.has_usable_password() and not user.check_password(password): return Response({"detail": "Your password is incorrect."}, status=400)
+        if not verify_totp(decrypt_secret(user.two_factor_secret), code): return Response({"detail": "The authenticator code is incorrect."}, status=400)
+        user.two_factor_enabled = False; user.two_factor_secret = ""; user.two_factor_pending_secret = ""; user.two_factor_recovery_codes = []
+        user.save(update_fields=["two_factor_enabled", "two_factor_secret", "two_factor_pending_secret", "two_factor_recovery_codes"])
+        AuditLog.objects.create(actor=user, action="auth.two_factor_disabled", target_type="user", target_id=str(user.id), metadata={"provider": "authenticator"})
+        return Response({"detail": "Two-factor authentication disabled."})
+
+class TwoFactorChallengeView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = [TwoFactorThrottle]
+    serializer_class = TwoFactorChallengeSerializer
+    @transaction.atomic
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data); serializer.is_valid(raise_exception=True)
+        challenge = TwoFactorLoginChallenge.objects.select_for_update().select_related("user").filter(token=serializer.validated_data["challenge_token"], used=False).first()
+        if not challenge or challenge.expires_at <= timezone.now(): return Response({"detail": "This sign-in challenge expired. Start again."}, status=400)
+        user = challenge.user
+        if not user.is_active or not user.two_factor_enabled: return Response({"detail": "This sign-in challenge is no longer valid."}, status=400)
+        code = serializer.validated_data["code"]
+        valid = verify_totp(decrypt_secret(user.two_factor_secret), code)
+        if not valid and len(code) >= 8: valid = consume_recovery_code(user, code)
+        if not valid: return Response({"detail": "The authenticator or recovery code is incorrect."}, status=400)
+        challenge.used = True; challenge.save(update_fields=["used"])
+        login(request, user, backend=challenge.backend)
+        AuditLog.objects.create(actor=user, action="auth.two_factor_login", target_type="user", target_id=str(user.id), metadata={"provider": "recovery" if len(code) >= 8 else "authenticator"})
+        return Response({"user": UserSerializer(user).data})
 
 class LogoutView(APIView):
     def post(self, request):

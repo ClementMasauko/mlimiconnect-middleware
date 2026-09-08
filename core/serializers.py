@@ -22,9 +22,10 @@ class UserSerializer(serializers.ModelSerializer):
     google_connected = serializers.SerializerMethodField()
     has_usable_password = serializers.SerializerMethodField()
     requires_onboarding = serializers.SerializerMethodField()
+    twoFactorEnabled = serializers.BooleanField(source="two_factor_enabled", read_only=True)
     class Meta:
         model = User
-        fields = ["id", "username", "email", "email_verified", "phone", "location", "user_type", "account_type", "can_buy", "can_sell", "organization_status", "isBuyerVerified", "is_seller_verified", "subscription", "google_connected", "has_usable_password", "requires_onboarding"]
+        fields = ["id", "username", "email", "email_verified", "phone", "location", "user_type", "account_type", "can_buy", "can_sell", "organization_status", "isBuyerVerified", "is_seller_verified", "subscription", "google_connected", "has_usable_password", "requires_onboarding", "twoFactorEnabled"]
         read_only_fields = ["id", "user_type", "account_type", "can_buy", "can_sell", "isBuyerVerified", "is_seller_verified"]
     def get_organization_status(self, obj) -> str | None:
         if obj.account_type == "individual": return None
@@ -118,6 +119,15 @@ class PasswordCredentialSerializer(serializers.Serializer):
 
 class GoogleUnlinkSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
+
+class TwoFactorCodeSerializer(serializers.Serializer):
+    code = serializers.CharField(min_length=6, max_length=20, trim_whitespace=True)
+
+class TwoFactorChallengeSerializer(TwoFactorCodeSerializer):
+    challenge_token = serializers.UUIDField()
+
+class TwoFactorDisableSerializer(TwoFactorCodeSerializer):
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
 class WholesalePriceTierSerializer(serializers.ModelSerializer):
     class Meta:

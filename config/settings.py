@@ -90,7 +90,7 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle", "rest_framework.throttling.UserRateThrottle"],
-    "DEFAULT_THROTTLE_RATES": {"anon": "100/hour", "user": "1000/hour", "ussd": "120/minute", "geocoding": "10/minute", "password_recovery": "5/hour", "password_reset_verify": "20/hour"},
+    "DEFAULT_THROTTLE_RATES": {"anon": "100/hour", "user": "1000/hour", "ussd": "120/minute", "geocoding": "10/minute", "password_recovery": "5/hour", "password_reset_verify": "20/hour", "two_factor": "10/minute"},
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 24,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",

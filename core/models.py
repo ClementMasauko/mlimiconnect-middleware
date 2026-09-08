@@ -22,6 +22,10 @@ class User(AbstractUser):
     email_verified = models.BooleanField(default=False)
     google_subject = models.CharField(max_length=255, unique=True, null=True, blank=True)
     google_onboarding_completed = models.BooleanField(default=True)
+    two_factor_enabled = models.BooleanField(default=False)
+    two_factor_secret = models.TextField(blank=True)
+    two_factor_pending_secret = models.TextField(blank=True)
+    two_factor_recovery_codes = models.JSONField(default=list, blank=True)
 
 class EmailVerificationRequest(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="email_verification_requests")
@@ -115,6 +119,14 @@ class AccountDeletionRequest(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     def set_code(self, code): self.code_hash = make_password(code)
     def verify_code(self, code): return check_password(code, self.code_hash)
+
+class TwoFactorLoginChallenge(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="two_factor_login_challenges")
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    backend = models.CharField(max_length=180, default="django.contrib.auth.backends.ModelBackend")
+    expires_at = models.DateTimeField()
+    used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
 
 class Listing(models.Model):
     TYPES = [("fixed-price", "Fixed price"), ("auction", "Auction"), ("both", "Both")]
