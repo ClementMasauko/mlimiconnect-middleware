@@ -18,6 +18,9 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 REQUIRE_PRIVILEGED_2FA = os.getenv("REQUIRE_PRIVILEGED_2FA", "false").lower() == "true"
 PAYOUT_DUAL_APPROVAL_THRESHOLD_MWK = os.getenv("PAYOUT_DUAL_APPROVAL_THRESHOLD_MWK", "500000")
 PAYOUT_DAILY_LIMIT_MWK = os.getenv("PAYOUT_DAILY_LIMIT_MWK", "5000000")
+PASSKEY_RP_ID = os.getenv("PASSKEY_RP_ID", "localhost").strip()
+PASSKEY_RP_NAME = os.getenv("PASSKEY_RP_NAME", "MlimiConnect").strip()
+PASSKEY_ORIGINS = [value.strip() for value in os.getenv("PASSKEY_ORIGINS", "http://localhost:5173").split(",") if value.strip()]
 APP_VERSION = os.getenv("RENDER_GIT_COMMIT", os.getenv("APP_VERSION", "development")).strip()
 ALLOWED_HOSTS = [v.strip() for v in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if v.strip()]
 
@@ -93,7 +96,7 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle", "rest_framework.throttling.UserRateThrottle"],
-    "DEFAULT_THROTTLE_RATES": {"anon": "100/hour", "user": "1000/hour", "ussd": "120/minute", "geocoding": "10/minute", "password_recovery": "5/hour", "password_reset_verify": "20/hour", "two_factor": "10/minute"},
+    "DEFAULT_THROTTLE_RATES": {"anon": "100/hour", "user": "1000/hour", "ussd": "120/minute", "geocoding": "10/minute", "password_recovery": "5/hour", "password_reset_verify": "20/hour", "two_factor": "10/minute", "passkey": "20/minute"},
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 24,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",

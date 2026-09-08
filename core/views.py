@@ -30,7 +30,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.throttling import SimpleRateThrottle
 from drf_spectacular.utils import extend_schema, extend_schema_view
-from .models import AccountDeletionRequest, AdvisoryUsage, AnimalRecord, AnimalWeightRecord, AnimalWelfareReport, AuditLog, ChatMessage, Conversation, CropDiagnosis, Delivery, DeliveryEvidence, DeliveryLocationUpdate, DeliveryQuote, DeliveryRating, DiagnosisEscalation, DiagnosisReport, Dispute, EmailVerificationRequest, ExpertConsultation, FavouriteListing, HerdFlock, HistoricalMarketPrice, LedgerTransaction, Listing, LiveAnimalListingDetail, LivestockAlert, LivestockBreedingRecord, LivestockCatalogueEntry, LivestockDeliveryRequirement, LivestockFinancialRecord, LivestockHealthEvent, LivestockMovementRestriction, LivestockProductionRecord, LivestockProfile, NewsletterSubscription, Notification, NotificationPreference, OperationalEvent, Order, OrderReview, Organization, OrganizationDocument, OrganizationMember, PasswordResetRequest, PaymentReconciliation, Payout, PlatformSetting, RecentlyViewedListing, Refund, SavedSearch, SellerSettlement, ServiceIncident, SmartContract, Subscription, TeamApprovalRequest, TraceabilityAudit, TraceabilityBatch, TraceabilityEvent, TransporterDocument, TransporterProfile, TwoFactorLoginChallenge, USSDCredential, User, VaccinationReminder, WalletTransaction, WantedListing
+from .models import AccountDeletionRequest, AdvisoryUsage, AnimalRecord, AnimalWeightRecord, AnimalWelfareReport, AuditLog, ChatMessage, Conversation, CropDiagnosis, Delivery, DeliveryEvidence, DeliveryLocationUpdate, DeliveryQuote, DeliveryRating, DiagnosisEscalation, DiagnosisReport, Dispute, EmailVerificationRequest, ExpertConsultation, FavouriteListing, HerdFlock, HistoricalMarketPrice, LedgerTransaction, Listing, LiveAnimalListingDetail, LivestockAlert, LivestockBreedingRecord, LivestockCatalogueEntry, LivestockDeliveryRequirement, LivestockFinancialRecord, LivestockHealthEvent, LivestockMovementRestriction, LivestockProductionRecord, LivestockProfile, NewsletterSubscription, Notification, NotificationPreference, OperationalEvent, Order, OrderReview, Organization, OrganizationDocument, OrganizationMember, PasskeyCredential, PasswordResetRequest, PaymentReconciliation, Payout, PlatformSetting, RecentlyViewedListing, Refund, SavedSearch, SellerSettlement, ServiceIncident, SmartContract, Subscription, TeamApprovalRequest, TraceabilityAudit, TraceabilityBatch, TraceabilityEvent, TransporterDocument, TransporterProfile, TwoFactorLoginChallenge, USSDCredential, User, VaccinationReminder, WalletTransaction, WantedListing
 from .order_lifecycle import transition_order
 from .communications import deliver_security_code
 from .providers import provider_statuses
@@ -48,6 +48,8 @@ from .serializers import CheckoutSerializer, ContactSerializer, ConversationSeri
 from .two_factor import consume_recovery_code, create_recovery_codes, decrypt_secret, encrypt_secret, generate_secret, provisioning_uri, verify_totp
 from .models import AuthSession
 from .auth_sessions import register_auth_session, revoke_auth_session
+from .passkeys import authentication_options, consume_challenge, credential_id_from_response, encode_credential_id, registration_options, verify_authentication, verify_registration
+from webauthn.helpers.exceptions import InvalidAuthenticationResponse, InvalidRegistrationResponse
 
 # APIView does not provide serializer metadata. This empty default keeps every
 # custom endpoint present in the generated OpenAPI document; concrete generic
@@ -60,6 +62,10 @@ class GeocodingThrottle(SimpleRateThrottle):
     scope = "geocoding"
     def get_cache_key(self, request, view):
         return self.cache_format % {"scope": self.scope, "ident": request.user.pk}
+class PasskeyThrottle(SimpleRateThrottle):
+    scope = "passkey"
+    def get_cache_key(self, request, view):
+        return self.get_ident(request)
 APIView.get_serializer = lambda self, *args, **kwargs: self.serializer_class(*args, **kwargs)
 
 class USSDRateThrottle(SimpleRateThrottle):
@@ -270,7 +276,70 @@ class GoogleUnlinkView(APIView):
 class AccountSecurityView(APIView):
     def get(self, request):
         activity = AuditLog.objects.filter(actor=request.user, action__startswith="auth.").order_by("-created_at")[:20]
-        return Response({"google_connected": bool(request.user.google_subject), "has_usable_password": request.user.has_usable_password(), "two_factor_enabled": request.user.two_factor_enabled, "recovery_codes_remaining": len(request.user.two_factor_recovery_codes), "recent_activity": [{"action": row.action, "provider": row.metadata.get("provider", "password"), "created_at": row.created_at} for row in activity]})
+        return Response({"google_connected": bool(request.user.google_subject), "has_usable_password": request.user.has_usable_password(), "two_factor_enabled": request.user.two_factor_enabled, "recovery_codes_remaining": len(request.user.two_factor_recovery_codes), "passkeys": list(request.user.passkeys.values("id", "name", "device_type", "backed_up", "last_used_at", "created_at")), "recent_activity": [{"action": row.action, "provider": row.metadata.get("provider", "password"), "created_at": row.created_at} for row in activity]})
+
+class PasskeyRegistrationOptionsView(APIView):
+    def post(self, request):
+        token, options = registration_options(request.user)
+        return Response({"challenge_token": token, "publicKey": options})
+
+class PasskeyRegistrationVerifyView(APIView):
+    @transaction.atomic
+    def post(self, request):
+        name = str(request.data.get("name", "Passkey")).strip()[:100] or "Passkey"
+        response = request.data.get("credential")
+        try:
+            ceremony = consume_challenge(request.data.get("challenge_token"), "register")
+            if ceremony.user_id != request.user.id: raise ValueError("This passkey request belongs to another account.")
+            verified = verify_registration(ceremony, response)
+            credential_id = encode_credential_id(verified.credential_id)
+            PasskeyCredential.objects.create(user=request.user, credential_id=credential_id, public_key=verified.credential_public_key, sign_count=verified.sign_count, name=name, transports=(response.get("response", {}).get("transports", []) if isinstance(response, dict) else []), device_type=str(verified.credential_device_type.value), backed_up=verified.credential_backed_up)
+        except (ValueError, InvalidRegistrationResponse, TypeError, KeyError):
+            return Response({"detail": "The passkey registration could not be verified."}, status=400)
+        AuditLog.objects.create(actor=request.user, action="auth.passkey_added", target_type="passkey", target_id=str(credential_id), metadata={"provider": "passkey", "name": name})
+        return Response({"detail": "Passkey added."}, status=201)
+
+class PasskeyAuthenticationOptionsView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = [PasskeyThrottle]
+    def post(self, request):
+        email = str(request.data.get("email", "")).strip().lower()
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if not user or not user.passkeys.exists(): return Response({"detail": "No passkey is available for this account."}, status=400)
+        token, options = authentication_options(user)
+        return Response({"challenge_token": token, "publicKey": options})
+
+class PasskeyAuthenticationVerifyView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = [PasskeyThrottle]
+    @transaction.atomic
+    def post(self, request):
+        response = request.data.get("credential")
+        try:
+            ceremony = consume_challenge(request.data.get("challenge_token"), "authenticate")
+            credential = PasskeyCredential.objects.select_for_update().get(user=ceremony.user, credential_id=credential_id_from_response(response))
+            verified = verify_authentication(ceremony, credential, response)
+        except (ValueError, DjangoValidationError, InvalidAuthenticationResponse, PasskeyCredential.DoesNotExist, TypeError, KeyError):
+            return Response({"detail": "The passkey sign-in could not be verified."}, status=400)
+        credential.sign_count = verified.new_sign_count
+        credential.last_used_at = timezone.now()
+        credential.backed_up = verified.credential_backed_up
+        credential.save(update_fields=["sign_count", "last_used_at", "backed_up"])
+        login(request, ceremony.user, backend="django.contrib.auth.backends.ModelBackend")
+        register_auth_session(request, ceremony.user)
+        AuditLog.objects.create(actor=ceremony.user, action="auth.passkey_login", target_type="user", target_id=str(ceremony.user_id), metadata={"provider": "passkey", "credential_id": credential.id})
+        return Response({"user": UserSerializer(ceremony.user).data})
+
+class PasskeyDeleteView(APIView):
+    def delete(self, request, passkey_id):
+        credential = generics.get_object_or_404(PasskeyCredential, id=passkey_id, user=request.user)
+        if request.user.passkeys.count() == 1 and not request.user.has_usable_password() and not request.user.google_subject:
+            return Response({"detail": "Add another sign-in method before removing your last passkey."}, status=409)
+        credential.delete()
+        AuditLog.objects.create(actor=request.user, action="auth.passkey_removed", target_type="passkey", target_id=str(passkey_id), metadata={"provider": "passkey"})
+        return Response(status=204)
 
 class TwoFactorSetupView(APIView):
     def post(self, request):

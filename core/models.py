@@ -27,6 +27,28 @@ class User(AbstractUser):
     two_factor_pending_secret = models.TextField(blank=True)
     two_factor_recovery_codes = models.JSONField(default=list, blank=True)
 
+class PasskeyCredential(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="passkeys")
+    credential_id = models.CharField(max_length=1024, unique=True)
+    public_key = models.BinaryField()
+    sign_count = models.PositiveBigIntegerField(default=0)
+    name = models.CharField(max_length=100, default="Passkey")
+    transports = models.JSONField(default=list, blank=True)
+    device_type = models.CharField(max_length=40, blank=True)
+    backed_up = models.BooleanField(default=False)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+class PasskeyChallenge(models.Model):
+    PURPOSES = [("register", "Register"), ("authenticate", "Authenticate")]
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="passkey_challenges")
+    purpose = models.CharField(max_length=16, choices=PURPOSES)
+    challenge = models.BinaryField()
+    expires_at = models.DateTimeField()
+    used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
 class EmailVerificationRequest(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="email_verification_requests")
     code_hash = models.CharField(max_length=128)

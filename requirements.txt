@@ -11,3 +11,4 @@ cloudinary==1.44.1
 google-auth[requests]==2.57.1
 cryptography==50.0.1
 sentry-sdk==2.35.0
+webauthn==3.0.0
