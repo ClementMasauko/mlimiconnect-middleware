@@ -309,6 +309,19 @@ class TwoFactorDisableView(APIView):
         AuditLog.objects.create(actor=user, action="auth.two_factor_disabled", target_type="user", target_id=str(user.id), metadata={"provider": "authenticator"})
         return Response({"detail": "Two-factor authentication disabled."})
 
+class TwoFactorRecoveryCodesView(APIView):
+    serializer_class = TwoFactorDisableSerializer
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data); serializer.is_valid(raise_exception=True)
+        user, code, password = request.user, serializer.validated_data["code"], serializer.validated_data.get("password", "")
+        if not user.two_factor_enabled: return Response({"detail": "Enable two-factor authentication first."}, status=400)
+        if user.has_usable_password() and not user.check_password(password): return Response({"detail": "Your password is incorrect."}, status=400)
+        if not verify_totp(decrypt_secret(user.two_factor_secret), code): return Response({"detail": "The authenticator code is incorrect."}, status=400)
+        recovery_codes, encoded = create_recovery_codes()
+        user.two_factor_recovery_codes = encoded; user.save(update_fields=["two_factor_recovery_codes"])
+        AuditLog.objects.create(actor=user, action="auth.two_factor_recovery_codes_regenerated", target_type="user", target_id=str(user.id), metadata={"provider": "authenticator"})
+        return Response({"recovery_codes": recovery_codes})
+
 class TwoFactorChallengeView(APIView):
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
@@ -536,7 +549,10 @@ class OrderDetail(generics.RetrieveAPIView):
     def get_queryset(self): return Order.objects.filter(Q(buyer=self.request.user) | Q(items__listing__seller=self.request.user)).distinct()
 
 class IsAdmin(permissions.BasePermission):
-    def has_permission(self, request, view): return bool(request.user and request.user.is_authenticated and (request.user.user_type == "admin" or request.user.is_staff))
+    message = "Two-factor authentication is required for privileged access. Open Sign-in & security to enable it."
+    def has_permission(self, request, view):
+        is_admin = bool(request.user and request.user.is_authenticated and (request.user.user_type == "admin" or request.user.is_staff))
+        return bool(is_admin and (not settings.REQUIRE_PRIVILEGED_2FA or request.user.two_factor_enabled))
 
 @method_decorator(csrf_exempt, name="dispatch")
 class PaymentWebhookView(APIView):
@@ -1863,7 +1879,7 @@ class LiveAnimalListingDetailView(APIView):
         return Response({"id": row.id, "verification_status": row.verification_status}, status=201)
 
 class AdminLiveAnimalVerificationView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsAdmin]
     def post(self, request, listing_id):
         row, decision = generics.get_object_or_404(LiveAnimalListingDetail, listing_id=listing_id), request.data.get("decision")
         if decision not in ["verified", "rejected"]: return Response({"detail": "Decision must be verified or rejected."}, status=400)
@@ -1948,7 +1964,7 @@ class LivestockRestrictionsView(APIView):
         return Response(list(rows.values("id", "species", "origin_region", "destination_region", "reason", "starts_on", "ends_on", "source_name", "source_reference")))
 
 class AdminLivestockOperationsView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsAdmin]
     def get(self, request):
         return Response({"pending_listings": list(LiveAnimalListingDetail.objects.filter(verification_status="pending").values("listing_id", "species", "breed", "health_inspection_date", "movement_permit_reference", "created_at")), "welfare_reports": list(AnimalWelfareReport.objects.values("id", "listing_id", "delivery_id", "category", "status", "assigned_to_id", "created_at")), "restrictions": list(LivestockMovementRestriction.objects.values()), "catalogue": list(LivestockCatalogueEntry.objects.values())})
     def post(self, request):

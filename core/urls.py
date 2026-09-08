@@ -16,6 +16,7 @@ urlpatterns = [
     path("auth/2fa/setup/", views.TwoFactorSetupView.as_view()),
     path("auth/2fa/confirm/", views.TwoFactorConfirmView.as_view()),
     path("auth/2fa/disable/", views.TwoFactorDisableView.as_view()),
+    path("auth/2fa/recovery-codes/", views.TwoFactorRecoveryCodesView.as_view()),
     path("auth/2fa/challenge/", views.TwoFactorChallengeView.as_view()),
     path("auth/logout/", views.LogoutView.as_view()),
     path("auth/profile/", views.ProfileView.as_view()),

@@ -15,6 +15,7 @@ FEATURE_SUBSCRIPTIONS_ENABLED = os.getenv("FEATURE_SUBSCRIPTIONS_ENABLED", "fals
 FEATURE_EXPERT_REQUESTS_ENABLED = os.getenv("FEATURE_EXPERT_REQUESTS_ENABLED", "false").lower() == "true"
 FEATURE_PROMOTIONS_ENABLED = os.getenv("FEATURE_PROMOTIONS_ENABLED", "false").lower() == "true"
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+REQUIRE_PRIVILEGED_2FA = os.getenv("REQUIRE_PRIVILEGED_2FA", "false").lower() == "true"
 APP_VERSION = os.getenv("RENDER_GIT_COMMIT", os.getenv("APP_VERSION", "development")).strip()
 ALLOWED_HOSTS = [v.strip() for v in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if v.strip()]
 

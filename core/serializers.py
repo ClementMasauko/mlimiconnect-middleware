@@ -23,9 +23,10 @@ class UserSerializer(serializers.ModelSerializer):
     has_usable_password = serializers.SerializerMethodField()
     requires_onboarding = serializers.SerializerMethodField()
     twoFactorEnabled = serializers.BooleanField(source="two_factor_enabled", read_only=True)
+    twoFactorRequired = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ["id", "username", "email", "email_verified", "phone", "location", "user_type", "account_type", "can_buy", "can_sell", "organization_status", "isBuyerVerified", "is_seller_verified", "subscription", "google_connected", "has_usable_password", "requires_onboarding", "twoFactorEnabled"]
+        fields = ["id", "username", "email", "email_verified", "phone", "location", "user_type", "account_type", "can_buy", "can_sell", "organization_status", "isBuyerVerified", "is_seller_verified", "subscription", "google_connected", "has_usable_password", "requires_onboarding", "twoFactorEnabled", "twoFactorRequired"]
         read_only_fields = ["id", "user_type", "account_type", "can_buy", "can_sell", "isBuyerVerified", "is_seller_verified"]
     def get_organization_status(self, obj) -> str | None:
         if obj.account_type == "individual": return None
@@ -36,6 +37,9 @@ class UserSerializer(serializers.ModelSerializer):
     def get_google_connected(self, obj) -> bool: return bool(obj.google_subject)
     def get_has_usable_password(self, obj) -> bool: return obj.has_usable_password()
     def get_requires_onboarding(self, obj) -> bool: return bool(obj.google_subject and not obj.google_onboarding_completed)
+    def get_twoFactorRequired(self, obj) -> bool:
+        privileged = obj.is_staff or obj.user_type in {"admin", "organization"} or obj.is_seller_verified or hasattr(obj, "transporter_profile")
+        return bool(privileged)
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)

@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.test import override_settings
 from rest_framework.test import APITestCase
 
 from .two_factor import decrypt_secret, totp
@@ -53,3 +54,21 @@ class TwoFactorAuthenticationTests(APITestCase):
         self.user.refresh_from_db()
         self.assertFalse(self.user.two_factor_enabled)
         self.assertEqual(self.user.two_factor_secret, "")
+
+    def test_recovery_codes_can_be_replaced_after_fresh_verification(self):
+        original = self.enable_two_factor()
+        self.client.force_authenticate(self.user); self.user.refresh_from_db()
+        response = self.client.post("/api/auth/2fa/recovery-codes/", {"password": "SafePassword!234", "code": totp(decrypt_secret(self.user.two_factor_secret))}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["recovery_codes"]), 10)
+        self.assertNotEqual(response.data["recovery_codes"], original)
+
+    @override_settings(REQUIRE_PRIVILEGED_2FA=True)
+    def test_admin_access_requires_enrolled_two_factor_when_policy_is_active(self):
+        self.user.is_staff = True; self.user.user_type = "admin"; self.user.save(update_fields=["is_staff", "user_type"])
+        self.client.force_authenticate(self.user)
+        blocked = self.client.get("/api/admin/users/")
+        self.assertEqual(blocked.status_code, 403)
+        self.user.two_factor_enabled = True; self.user.save(update_fields=["two_factor_enabled"])
+        allowed = self.client.get("/api/admin/users/")
+        self.assertEqual(allowed.status_code, 200)
