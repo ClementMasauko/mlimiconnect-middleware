@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.contrib.auth import login, logout
+from django.conf import settings
 from django.middleware.csrf import get_token
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
@@ -1288,6 +1289,8 @@ class AdminFinanceOverview(APIView):
             "refunds_in_progress": Refund.objects.filter(status__in=["requested", "submitted"]).count(),
             "settlements": list(SellerSettlement.objects.values("status").annotate(count=Count("id"), amount=Sum("net_amount")).order_by("status")),
             "payouts": list(Payout.objects.values("status").annotate(count=Count("id"), amount=Sum("amount")).order_by("status")),
+            "pending_payout_approvals": list(Payout.objects.filter(status="requested").select_related("seller", "requested_by").values("id", "seller_id", "seller__username", "amount", "provider", "provider_reference", "destination_hint", "requested_by_id", "requested_by__username", "created_at")),
+            "payout_controls": {"dual_approval_threshold_mwk": str(settings.PAYOUT_DUAL_APPROVAL_THRESHOLD_MWK), "daily_limit_mwk": str(settings.PAYOUT_DAILY_LIMIT_MWK)},
             "ledger_imbalances": imbalanced,
         })
 
@@ -1300,8 +1303,15 @@ class AdminPayoutCreate(APIView):
         provider = str(request.data.get("provider", "")).strip()
         reference = str(request.data.get("provider_reference", "")).strip()
         payout_status = request.data.get("status", "submitted")
+        reason = str(request.data.get("reason", "")).strip()
+        idempotency_key = str(request.headers.get("Idempotency-Key", "")).strip()
         if not settlement_ids or len(settlements) != len(set(settlement_ids)) or not provider or not reference or payout_status not in ["submitted", "paid"]:
             return Response({"detail": "Seller, available settlements, provider, unique reference and valid status are required."}, status=400)
+        if len(reason) < 10:
+            return Response({"detail": "A payout reason of at least 10 characters is required."}, status=400)
+        if not idempotency_key or len(idempotency_key) > 120:
+            return Response({"detail": "An Idempotency-Key header of at most 120 characters is required."}, status=400)
+        existing = Payout.objects.filter(idempotency_key=idempotency_key).first()
         try:
             from .finance import create_payout
             payout = create_payout(
@@ -1309,11 +1319,29 @@ class AdminPayoutCreate(APIView):
                 provider_reference=reference, requested_by=request.user,
                 destination_hint=str(request.data.get("destination_hint", ""))[:40],
                 status=payout_status, provider_payload=request.data.get("provider_payload", {}),
+                idempotency_key=idempotency_key,
             )
         except ValueError as error:
             return Response({"detail": str(error)}, status=409)
-        audit_change(actor=request.user, action="payout.created", target=payout, before={}, after=snapshot(payout, ["seller", "amount", "status", "provider", "provider_reference"]), reason=str(request.data.get("reason", "Payout processed.")))
-        return Response({"id": payout.id, "amount": payout.amount, "status": payout.status, "provider_reference": payout.provider_reference}, status=201)
+        if not existing:
+            audit_change(actor=request.user, action="payout.created", target=payout, before={}, after=snapshot(payout, ["seller", "amount", "status", "provider", "provider_reference"]), reason=reason)
+        return Response({"id": payout.id, "amount": payout.amount, "status": payout.status, "provider_reference": payout.provider_reference, "requires_approval": payout.status == "requested"}, status=200 if existing else 201)
+
+class AdminPayoutReview(APIView):
+    permission_classes = [IsAdmin]
+    def post(self, request, payout_id):
+        payout = generics.get_object_or_404(Payout, id=payout_id)
+        decision = str(request.data.get("decision", "")).strip().lower()
+        reason = str(request.data.get("reason", "")).strip()
+        before = snapshot(payout, ["status", "approved_by", "approved_at", "approval_reason"])
+        try:
+            from .finance import review_payout
+            payout = review_payout(payout=payout, reviewer=request.user, decision=decision, reason=reason)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=409)
+        audit_change(actor=request.user, action=f"payout.{decision}d", target=payout, before=before, after=snapshot(payout, ["status", "approved_by", "approved_at", "approval_reason"]), reason=reason)
+        Notification.objects.create(user=payout.seller, type="payout", title="Payout status updated", message=f"Payout {payout.provider_reference} is now {payout.status}.", action_url="/app/wallet")
+        return Response({"id": payout.id, "status": payout.status, "approved_by": payout.approved_by_id, "approved_at": payout.approved_at})
 
 class AdminDeliveries(APIView):
     permission_classes = [IsAdmin]

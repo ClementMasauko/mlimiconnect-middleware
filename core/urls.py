@@ -125,6 +125,7 @@ urlpatterns = [
     path("admin/reconciliations/", views.AdminReconciliations.as_view()),
     path("admin/finance/", views.AdminFinanceOverview.as_view()),
     path("admin/payouts/", views.AdminPayoutCreate.as_view()),
+    path("admin/payouts/<int:payout_id>/review/", views.AdminPayoutReview.as_view()),
     path("admin/deliveries/", views.AdminDeliveries.as_view()),
     path("admin/orders/<int:order_id>/refunds/", views.AdminOrderRefund.as_view()),
     path("admin/refunds/<int:refund_id>/status/", views.AdminRefundStatus.as_view()),

@@ -16,6 +16,8 @@ FEATURE_EXPERT_REQUESTS_ENABLED = os.getenv("FEATURE_EXPERT_REQUESTS_ENABLED", "
 FEATURE_PROMOTIONS_ENABLED = os.getenv("FEATURE_PROMOTIONS_ENABLED", "false").lower() == "true"
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 REQUIRE_PRIVILEGED_2FA = os.getenv("REQUIRE_PRIVILEGED_2FA", "false").lower() == "true"
+PAYOUT_DUAL_APPROVAL_THRESHOLD_MWK = os.getenv("PAYOUT_DUAL_APPROVAL_THRESHOLD_MWK", "500000")
+PAYOUT_DAILY_LIMIT_MWK = os.getenv("PAYOUT_DAILY_LIMIT_MWK", "5000000")
 APP_VERSION = os.getenv("RENDER_GIT_COMMIT", os.getenv("APP_VERSION", "development")).strip()
 ALLOWED_HOSTS = [v.strip() for v in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if v.strip()]
 
