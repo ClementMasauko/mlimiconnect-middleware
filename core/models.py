@@ -128,6 +128,15 @@ class TwoFactorLoginChallenge(models.Model):
     used = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
+class AuthSession(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="auth_sessions")
+    session_key = models.CharField(max_length=40, unique=True)
+    user_agent = models.CharField(max_length=300, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
 class Listing(models.Model):
     TYPES = [("fixed-price", "Fixed price"), ("auction", "Auction"), ("both", "Both")]
     APPROVAL = [("pending", "Pending"), ("approved", "Approved"), ("rejected", "Rejected"), ("suspended", "Suspended")]

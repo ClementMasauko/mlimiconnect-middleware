@@ -12,6 +12,7 @@ urlpatterns = [
     path("auth/google/link/", views.GoogleLinkView.as_view()),
     path("auth/google/unlink/", views.GoogleUnlinkView.as_view()),
     path("auth/security/", views.AccountSecurityView.as_view()),
+    path("auth/security/sessions/", views.AuthSessionsView.as_view()),
     path("auth/2fa/setup/", views.TwoFactorSetupView.as_view()),
     path("auth/2fa/confirm/", views.TwoFactorConfirmView.as_view()),
     path("auth/2fa/disable/", views.TwoFactorDisableView.as_view()),

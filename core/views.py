@@ -45,6 +45,8 @@ from .crop_planning import build_crop_plan
 from .protected_files import protected_file_link, serve_protected_file
 from .serializers import CheckoutSerializer, ContactSerializer, ConversationSerializer, GoogleCredentialSerializer, GoogleLoginResponseSerializer, GoogleOnboardingSerializer, GoogleUnlinkSerializer, ListingSerializer, LoginSerializer, MessageSerializer, NewsletterSerializer, NotificationSerializer, OrderReviewSerializer, OrderSerializer, OrganizationSerializer, PasswordCredentialSerializer, RegisterSerializer, SubscriptionSerializer, TraceabilityBatchSerializer, TwoFactorChallengeSerializer, TwoFactorCodeSerializer, TwoFactorDisableSerializer, UserSerializer
 from .two_factor import consume_recovery_code, create_recovery_codes, decrypt_secret, encrypt_secret, generate_secret, provisioning_uri, verify_totp
+from .models import AuthSession
+from .auth_sessions import register_auth_session, revoke_auth_session
 
 # APIView does not provide serializer metadata. This empty default keeps every
 # custom endpoint present in the generated OpenAPI document; concrete generic
@@ -141,6 +143,7 @@ class LoginView(APIView):
             challenge = TwoFactorLoginChallenge.objects.create(user=user, expires_at=timezone.now() + timedelta(minutes=5))
             return Response({"two_factor_required": True, "challenge_token": challenge.token})
         login(request, user)
+        register_auth_session(request, user)
         return Response({"user": UserSerializer(user).data})
 
 def unique_google_username(email):
@@ -203,6 +206,7 @@ class GoogleLoginView(APIView):
             challenge = TwoFactorLoginChallenge.objects.create(user=user, expires_at=timezone.now() + timedelta(minutes=5))
             return Response({"two_factor_required": True, "challenge_token": challenge.token})
         login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+        register_auth_session(request, user)
         AuditLog.objects.create(actor=user, action="auth.google_login", target_type="user", target_id=str(user.id), metadata={"provider": "google", "success": True})
         return Response({"user": UserSerializer(user).data})
 
@@ -323,13 +327,29 @@ class TwoFactorChallengeView(APIView):
         if not valid: return Response({"detail": "The authenticator or recovery code is incorrect."}, status=400)
         challenge.used = True; challenge.save(update_fields=["used"])
         login(request, user, backend=challenge.backend)
+        register_auth_session(request, user)
         AuditLog.objects.create(actor=user, action="auth.two_factor_login", target_type="user", target_id=str(user.id), metadata={"provider": "recovery" if len(code) >= 8 else "authenticator"})
         return Response({"user": UserSerializer(user).data})
 
 class LogoutView(APIView):
     def post(self, request):
+        AuthSession.objects.filter(session_key=request.session.session_key, revoked_at=None).update(revoked_at=timezone.now())
         logout(request)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+class AuthSessionsView(APIView):
+    def get(self, request):
+        current = request.session.session_key
+        rows = AuthSession.objects.filter(user=request.user, revoked_at=None).order_by("-last_seen_at")
+        return Response([{"id": row.id, "current": row.session_key == current, "device": row.user_agent or "Unknown device", "ip_address": row.ip_address, "created_at": row.created_at, "last_seen_at": row.last_seen_at} for row in rows])
+    def delete(self, request):
+        current = request.session.session_key
+        rows = AuthSession.objects.filter(user=request.user, revoked_at=None)
+        rows = rows.exclude(session_key=current) if request.data.get("all_other") else rows.filter(id=request.data.get("id")).exclude(session_key=current)
+        count = 0
+        for row in rows: revoke_auth_session(row); count += 1
+        AuditLog.objects.create(actor=request.user, action="auth.sessions_revoked", target_type="user", target_id=str(request.user.id), metadata={"count": count})
+        return Response({"revoked": count})
 
 class ProfileView(generics.RetrieveUpdateAPIView):
     serializer_class = UserSerializer
