@@ -122,6 +122,10 @@ services:
         value: "0"
       - key: SENTRY_ERROR_SAMPLE_RATE
         value: "1"
+      - key: PAYOUT_DUAL_APPROVAL_THRESHOLD_MWK
+        value: "500000"
+      - key: PAYOUT_DAILY_LIMIT_MWK
+        value: "5000000"
       - key: CSRF_TRUSTED_ORIGINS
         sync: false
 
