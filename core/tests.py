@@ -193,6 +193,36 @@ class ApiTests(TestCase):
         created=self.client.post("/api/ussd/credentials/",{"pin":"1234","privacy_ack":True},format="json")
         self.assertEqual(created.status_code,200);self.assertTrue(USSDCredential.objects.get(user=self.user).verify("1234"))
 
+    @override_settings(USSD_SERVICE_KEY="ussd-test", USSD_ALLOWED_IPS=["127.0.0.1"])
+    def test_ussd_farmer_sales_input_requests_and_chichewa_advice(self):
+        self.user.phone = "+265999000000"
+        self.user.can_sell = True
+        self.user.can_buy = True
+        self.user.location = "Lilongwe"
+        self.user.save(update_fields=["phone", "can_sell", "can_buy", "location"])
+        credential = USSDCredential(user=self.user, enabled=True)
+        credential.set_pin("1234")
+        credential.save()
+        headers = {"HTTP_X_USSD_SERVICE_KEY": "ussd-test", "HTTP_ACCEPT_LANGUAGE": "ny"}
+
+        sale_headers = {**headers, "HTTP_IDEMPOTENCY_KEY": "ussd:test:sale"}
+        sale = self.client.post("/api/ussd/services/sales/", {"phone": self.user.phone, "category": "crop", "item": "chimanga", "quantity": 50, "price": 1200}, format="json", **sale_headers)
+        replay = self.client.post("/api/ussd/services/sales/", {"phone": self.user.phone, "category": "crop", "item": "chimanga", "quantity": 50, "price": 1200}, format="json", **sale_headers)
+        self.assertEqual(sale.status_code, 201)
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.data["replayed"])
+        self.assertEqual(Listing.objects.filter(seller=self.user, name="chimanga").count(), 1)
+
+        request = self.client.post("/api/ussd/services/input-requests/", {"phone": self.user.phone, "item": "feteleza", "quantity": 4}, format="json", HTTP_IDEMPOTENCY_KEY="ussd:test:input", **headers)
+        self.assertEqual(request.status_code, 201)
+        self.assertTrue(WantedListing.objects.filter(buyer=self.user, title="feteleza", category="farm-inputs").exists())
+
+        Listing.objects.create(seller=self.user, name="Maize", description="Grade A", price="1000", quantity=10, category="produce", unit="kg", approval_status="approved", is_active=True)
+        prices = self.client.get("/api/ussd/services/prices/?language=ny", **headers)
+        livestock = self.client.get("/api/ussd/services/livestock-advice/?animal=mbuzi&language=ny", **headers)
+        self.assertEqual(prices.data["items"][0]["crop_ny"], "Chimanga")
+        self.assertIn("madzi", livestock.data["guidance_ny"])
+
     def test_contact_is_persisted(self):
         response = self.client.post("/api/contact/", {"name": "Alick", "email": "a@example.mw", "subject": "Help", "message": "Please contact me."}, format="json")
         self.assertEqual(response.status_code, 201)

@@ -1701,28 +1701,129 @@ class USSDAuthenticateView(APIView):
         return Response({"authenticated": authenticated})
 
 class USSDServiceView(APIView):
-    permission_classes=[permissions.AllowAny];authentication_classes=[];throttle_classes=[USSDRateThrottle]
-    def get(self,request,service):
-        if not settings.USSD_SERVICE_KEY or not hmac.compare_digest(request.headers.get("X-USSD-Service-Key",""),settings.USSD_SERVICE_KEY): return Response({"detail":"Forbidden."},status=403)
-        if not ussd_source_allowed(request):return Response({"detail":"Source IP is not allowed."},status=403)
-        key=f"ussd-service:{service}:{hashlib.sha256(json.dumps(dict(request.query_params),sort_keys=True).encode()).hexdigest()[:20]}";cached=cache.get(key)
-        if cached:return Response({**cached,"cached":True})
-        if service=="prices":
-            rows=Listing.objects.filter(is_active=True,approval_status="approved").values("category","unit").annotate(price=__import__("django.db.models",fromlist=["Avg"]).Avg("price"),count=Count("id")).order_by("category")[:5];data={"items":[{"crop":r["category"],"unit":r["unit"],"price":round(r["price"]),"count":r["count"]}for r in rows],"source":"MlimiConnect approved listings","collected_at":timezone.now()}
-        elif service=="orders":
-            phone=str(request.query_params.get("phone","")).strip();user=User.objects.filter(phone=phone).first();rows=Order.objects.filter(buyer=user).order_by("-created_at")[:3]if user else[];data={"items":[{"id":r.id,"status":r.status,"total":r.total}for r in rows]}
-        elif service=="weather":
-            district=str(request.query_params.get("district","")).strip()[:80]
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = [USSDRateThrottle]
+
+    def _authorize(self, request):
+        configured = settings.USSD_SERVICE_KEY
+        supplied = request.headers.get("X-USSD-Service-Key", "")
+        if not configured or not supplied or not hmac.compare_digest(supplied, configured):
+            return Response({"detail": "Forbidden."}, status=403)
+        if not ussd_source_allowed(request):
+            return Response({"detail": "Source IP is not allowed."}, status=403)
+        return None
+
+    def get(self, request, service):
+        denied = self._authorize(request)
+        if denied:
+            return denied
+        language = "ny" if request.query_params.get("language") == "ny" or request.headers.get("Accept-Language", "").lower().startswith("ny") else "en"
+        key_data = {"params": dict(request.query_params), "language": language}
+        key = f"ussd-service:{service}:{hashlib.sha256(json.dumps(key_data, sort_keys=True).encode()).hexdigest()[:20]}"
+        cached = cache.get(key)
+        if cached:
+            return Response({**cached, "cached": True})
+
+        if service == "prices":
+            crop_names = {"maize": "Chimanga", "rice": "Mpunga", "beans": "Nyemba", "groundnuts": "Mtedza", "soybeans": "Soya", "tomato": "Phwetekere"}
+            units = {"kg": "kg", "tonne": "tani", "bag": "thumba", "crate": "kireti", "litre": "lita", "item": "chimodzi"}
+            rows = Listing.objects.filter(is_active=True, approval_status="approved").values("name", "unit").annotate(price=__import__("django.db.models", fromlist=["Avg"]).Avg("price"), count=Count("id")).order_by("name")[:5]
+            data = {"items": [{"crop": row["name"], "crop_ny": crop_names.get(row["name"].lower(), row["name"]), "unit": row["unit"], "unit_ny": units.get(row["unit"], row["unit"]), "price": round(row["price"]), "count": row["count"]} for row in rows], "source": "MlimiConnect approved listings", "collected_at": timezone.now()}
+        elif service == "orders":
+            phone = str(request.query_params.get("phone", "")).strip()
+            user = User.objects.filter(phone=phone, is_active=True).first()
+            rows = Order.objects.filter(Q(buyer=user) | Q(items__listing__seller=user)).distinct().order_by("-created_at")[:3] if user else []
+            data = {"items": [{"id": row.id, "status": row.status, "total": row.total} for row in rows]}
+        elif service == "weather":
+            district = str(request.query_params.get("district", "")).strip()[:80]
             try:
-                weather=get_weather(district or "Lilongwe");current=weather["current"];today=weather["forecast"][0] if weather["forecast"] else {}
-                data={"district":weather["location"],"summary":f'{current["condition"]}, {current["temperature_c"]} C. Rain chance {today.get("rain_probability_percent") or 0}%.',"source":weather["source"],"collected_at":weather["collected_at"],"stale":weather["stale"]}
-            except ValueError as error:return Response({"detail":str(error)},status=400)
-            except WeatherUnavailable:return Response({"detail":"Weather service is temporarily unavailable."},status=503)
-        elif service=="pest":
-            crop=str(request.query_params.get("crop","")).strip()[:50];tips={"maize":"Inspect the whorl for fall armyworm. Use locally approved controls and contact an extension officer.","tomato":"Inspect leaf undersides, remove badly affected material, and ask an extension officer before pesticide use."};data={"crop":crop,"guidance":tips.get(crop.lower(),"Isolate affected plants, avoid handling healthy plants afterward, and contact an agricultural extension officer."),"source":"MlimiConnect safety knowledge base","diagnosis":False}
-        elif service=="support":data={"phone":settings.SUPPORT_PHONE,"email":settings.SUPPORT_EMAIL,"hours":"Mon-Sat 07:00-18:00 CAT"}
-        else:return Response({"detail":"Unknown USSD service."},status=404)
-        cache.set(key,data,300 if service in{"orders","weather"}else 1800);return Response({**data,"cached":False})
+                weather = get_weather(district or "Lilongwe")
+                current = weather["current"]
+                today = weather["forecast"][0] if weather["forecast"] else {}
+                rain = today.get("rain_probability_percent") or 0
+                conditions = {"clear": "Kuli bwino", "sunny": "Kuli dzuwa", "partly cloudy": "Kuli mitambo pang'ono", "cloudy": "Kuli mitambo", "rain": "Kugwa mvula", "light rain": "Kugwa mvula pang'ono", "thunderstorm": "Mvula ya mabingu"}
+                condition = str(current["condition"])
+                data = {"district": weather["location"], "summary": f'{condition}, {current["temperature_c"]} C. Rain chance {rain}%.', "summary_ny": f'{conditions.get(condition.lower(), condition)}, {current["temperature_c"]} C. Mwayi wa mvula {rain}%.', "source": weather["source"], "collected_at": weather["collected_at"], "stale": weather["stale"]}
+            except ValueError as error:
+                return Response({"detail": str(error)}, status=400)
+            except WeatherUnavailable:
+                return Response({"detail": "Weather service is temporarily unavailable."}, status=503)
+        elif service == "pest":
+            crop = str(request.query_params.get("crop", "")).strip()[:50]
+            tips = {"maize": "Inspect the whorl for fall armyworm. Use locally approved controls and contact an extension officer.", "tomato": "Inspect leaf undersides, remove badly affected material, and ask an extension officer before pesticide use."}
+            tips_ny = {"maize": "Yang'anani mbozi m'kati mwa masamba a chimanga. Gwiritsani mankhwala ovomerezeka ndipo funsani mlangizi wa ulimi.", "chimanga": "Yang'anani mbozi m'kati mwa masamba a chimanga. Gwiritsani mankhwala ovomerezeka ndipo funsani mlangizi wa ulimi.", "tomato": "Yang'anani pansi pa masamba. Chotsani masamba odwala kwambiri ndipo funsani mlangizi musanagwiritse ntchito mankhwala.", "phwetekere": "Yang'anani pansi pa masamba. Chotsani masamba odwala kwambiri ndipo funsani mlangizi musanagwiritse ntchito mankhwala."}
+            data = {"crop": crop, "guidance": tips.get(crop.lower(), "Isolate affected plants, avoid handling healthy plants afterward, and contact an agricultural extension officer."), "guidance_ny": tips_ny.get(crop.lower(), "Patulani mbewu zodwala, musagwire zathanzi mukamaliza, ndipo funsani mlangizi wa ulimi."), "source": "MlimiConnect safety knowledge base", "diagnosis": False}
+        elif service == "livestock-advice":
+            animal = str(request.query_params.get("animal", "")).strip()[:50]
+            names = {"mbuzi": "goats", "ng'ombe": "cattle", "nkhuku": "chickens", "nkhumba": "pigs"}
+            kind = names.get(animal.lower(), animal.lower())
+            tips = {"goats": "Provide dry shelter, clean water and safe feed. Watch appetite and body condition.", "cattle": "Provide clean water and shade. Watch for swelling, pain, poor appetite or unusual breathing.", "chickens": "Keep drinking water clean, litter dry and housing well ventilated.", "pigs": "Keep housing clean, control visitors and urgently report fever or sudden deaths."}
+            tips_ny = {"goats": "Perekani khola louma, madzi oyera ndi chakudya chabwino. Yang'anani kudya ndi thanzi.", "cattle": "Perekani madzi oyera ndi mthunzi. Yang'anani kutupa, kupweteka, kusadya kapena kupuma movutika.", "chickens": "Sungani madzi akumwa oyera, pansi pouma ndi khola lokhala ndi mpweya wabwino.", "pigs": "Sungani khola loyera, chepetsani alendo ndipo nenani msanga za malungo kapena kufa mwadzidzidzi."}
+            data = {"animal": animal, "guidance": tips.get(kind, "Provide clean water, safe feed and suitable shelter. Isolate sick animals and contact a livestock officer."), "guidance_ny": tips_ny.get(kind, "Perekani madzi oyera, chakudya chabwino ndi khola loyenera. Patulani zodwala ndipo funsani katswiri wa ziweto.")}
+        elif service == "support":
+            data = {"phone": settings.SUPPORT_PHONE, "email": settings.SUPPORT_EMAIL, "hours": "Mon-Sat 07:00-18:00 CAT", "hours_ny": "Lolemba-Loweruka, 07:00-18:00"}
+        else:
+            return Response({"detail": "Unknown USSD service."}, status=404)
+        cache.set(key, data, 300 if service in {"orders", "weather"} else 1800)
+        return Response({**data, "cached": False})
+
+    def post(self, request, service):
+        denied = self._authorize(request)
+        if denied:
+            return denied
+        if service not in {"sales", "input-requests"}:
+            return Response({"detail": "Unknown USSD service."}, status=404)
+        request_id = request.headers.get("Idempotency-Key", "")
+        if not re.fullmatch(r"[A-Za-z0-9:._-]{8,120}", request_id):
+            return Response({"detail": "A valid idempotency key is required."}, status=400)
+        result_key = f"ussd-command-result:{service}:{request_id}"
+        cached = cache.get(result_key)
+        if cached:
+            return Response({**cached, "replayed": True})
+        lock_key = f"ussd-command-lock:{service}:{request_id}"
+        if not cache.add(lock_key, True, 30):
+            return Response({"detail": "This request is already being processed."}, status=409)
+        try:
+            phone = str(request.data.get("phone", "")).strip()
+            user = User.objects.filter(phone=phone, is_active=True).first()
+            if not user or not USSDCredential.objects.filter(user=user, enabled=True).exists():
+                return Response({"detail": "Registered USSD user not found."}, status=404)
+            item = str(request.data.get("item", "")).strip()[:80]
+            try:
+                quantity = int(request.data.get("quantity"))
+            except (TypeError, ValueError):
+                quantity = 0
+            if len(item) < 2 or quantity < 1 or quantity > 999999:
+                return Response({"detail": "A valid item and quantity are required."}, status=400)
+
+            if service == "sales":
+                if not user.can_sell:
+                    return Response({"detail": "This account is not enabled to sell."}, status=403)
+                category = request.data.get("category")
+                try:
+                    price = Decimal(str(request.data.get("price")))
+                except InvalidOperation:
+                    price = Decimal("0")
+                if category not in {"crop", "livestock"} or price <= 0 or price > Decimal("9999999999"):
+                    return Response({"detail": "A valid sale type and price are required."}, status=400)
+                is_livestock = category == "livestock"
+                row = Listing.objects.create(seller=user, name=item, description="Submitted through USSD. Staff review and verification are required before publication.", price=price, quantity=quantity, unit="item" if is_livestock else "kg", category="live-animals" if is_livestock else "produce", approval_status="pending", is_active=not is_livestock, moderation_reason="USSD livestock enquiry requires herd, welfare, health and movement details before activation." if is_livestock else "")
+                if is_livestock:
+                    for admin in User.objects.filter(is_staff=True, is_active=True):
+                        Notification.objects.create(user=admin, type="listing_verification", title="USSD livestock sale needs follow-up", message=f"Contact {user.phone} to complete welfare and verification details for listing #{row.id}.", action_url="/admin/listings")
+                AuditLog.objects.create(actor=user, action="ussd.sale_submitted", target_type="listing", target_id=str(row.id), metadata={"category": category})
+                data = {"id": row.id, "status": "pending_review", "requires_follow_up": is_livestock}
+            else:
+                if not user.can_buy:
+                    return Response({"detail": "This account is not enabled to buy."}, status=403)
+                row = WantedListing.objects.create(buyer=user, title=item, description="Farm-input request submitted through USSD.", category="farm-inputs", quantity=quantity, unit="item", location=user.location, status="open")
+                AuditLog.objects.create(actor=user, action="ussd.input_request_submitted", target_type="wanted_listing", target_id=str(row.id), metadata={})
+                data = {"id": row.id, "status": row.status}
+            cache.set(result_key, data, 86400)
+            return Response(data, status=201)
+        finally:
+            cache.delete(lock_key)
 
 
 class WeatherAdvisoryView(APIView):
