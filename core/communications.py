@@ -135,47 +135,131 @@ def enqueue_delivery(user, channel, category, body, subject="", essential=False)
     return message
 
 
+
 def process_outbox_message(message_id):
     now = timezone.now()
+
+    # Lock only the outbox row, not the nullable joined user row.
     with transaction.atomic():
-        message = OutboxMessage.objects.select_for_update().select_related("user").filter(
-            id=message_id,
-            status__in=["pending", "processing"],
-            available_at__lte=now,
-        ).first()
+        message = (
+            OutboxMessage.objects
+            .select_for_update(of=("self",))
+            .select_related("user")
+            .filter(
+                id=message_id,
+                status="pending",
+                available_at__lte=now,
+            )
+            .first()
+        )
+
         if not message:
             return False
+
         message.status = "processing"
         message.locked_at = now
         message.attempt_count += 1
-        message.save(update_fields=["status", "locked_at", "attempt_count", "updated_at"])
+        message.save(
+            update_fields=[
+                "status",
+                "locked_at",
+                "attempt_count",
+                "updated_at",
+            ]
+        )
 
     try:
         if not message.user:
             raise RuntimeError("recipient_deleted")
-        delivery = (
-            deliver_email(message.user, message.subject, message.body, message.category, message.essential)
-            if message.channel == "email"
-            else deliver_sms(message.user, message.body, message.category, message.essential)
-        )
-        if delivery is not None and delivery.status == "failed":
-            raise RuntimeError(delivery.error_code or "provider_rejected")
+
+        if message.channel == "email":
+            delivery = deliver_email(
+                message.user,
+                message.subject,
+                message.body,
+                message.category,
+                message.essential,
+            )
+        elif message.channel == "sms":
+            delivery = deliver_sms(
+                message.user,
+                message.body,
+                message.category,
+                message.essential,
+            )
+        else:
+            raise RuntimeError("unsupported_channel")
+
+        # Never report success unless the provider accepted delivery.
+        if delivery is None:
+            raise RuntimeError("no_delivery_record")
+
+        if delivery.status != "accepted":
+            raise RuntimeError(
+                delivery.error_code or delivery.status
+            )
+
     except Exception as error:
-        message.last_error = type(error).__name__ if not str(error) else str(error)[:160]
-        if message.attempt_count >= settings.OUTBOX_MAX_ATTEMPTS:
+        error_code = str(error)[:160] or type(error).__name__
+
+        # Avoid endlessly retrying a known permanent configuration error.
+        permanent_errors = {
+            "provider_not_configured",
+            "no_delivery_record",
+            "recipient_deleted",
+            "unsupported_channel",
+        }
+
+        if (
+            error_code in permanent_errors
+            or message.attempt_count >= settings.OUTBOX_MAX_ATTEMPTS
+        ):
             message.status = "failed"
         else:
             message.status = "pending"
-            message.available_at = now + timedelta(seconds=min(3600, 30 * (2 ** (message.attempt_count - 1))))
+            message.available_at = timezone.now() + timedelta(
+                seconds=min(
+                    3600,
+                    30 * (2 ** (message.attempt_count - 1)),
+                )
+            )
+
         message.locked_at = None
-        message.save(update_fields=["status", "available_at", "locked_at", "last_error", "updated_at"])
+        message.last_error = error_code
+        message.save(
+            update_fields=[
+                "status",
+                "available_at",
+                "locked_at",
+                "last_error",
+                "updated_at",
+            ]
+        )
+
+        logger.warning(
+            "outbox_delivery_failed",
+            extra={
+                "message_id": message.id,
+                "channel": message.channel,
+                "attempt": message.attempt_count,
+                "error_code": error_code,
+            },
+        )
         return False
 
     message.status = "sent"
     message.sent_at = timezone.now()
     message.locked_at = None
     message.last_error = ""
-    message.save(update_fields=["status", "sent_at", "locked_at", "last_error", "updated_at"])
+    message.save(
+        update_fields=[
+            "status",
+            "sent_at",
+            "locked_at",
+            "last_error",
+            "updated_at",
+        ]
+    )
     return True
 
 
